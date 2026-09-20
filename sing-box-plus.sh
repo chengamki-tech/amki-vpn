@@ -1579,7 +1579,7 @@ vpngate_write_singbox_config(){
         independent_cache:true
       },
       inbounds:[{type:"mixed", tag:"mixed-in", listen:"127.0.0.1", listen_port:$port}],
-      outbounds:[{type:"direct", tag:"direct", domain_strategy:"prefer_ipv4"}],
+      outbounds:[{type:"direct", tag:"direct"}],
       route:{auto_detect_interface:true,default_domain_resolver:"dns-cloudflare",final:"direct"}
     }
   ' > "$VPNDIR/sing-box.json"
