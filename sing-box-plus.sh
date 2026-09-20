@@ -1542,6 +1542,9 @@ uid="\$(id -u $VPNGATE_USER)"
 dev="\${dev:-$VPNGATE_DEV}"
 table="$VPNGATE_ROUTE_TABLE"
 ip route replace default dev "\$dev" table "\$table"
+# Keep IPv6 inside the policy table too. The explicit reject route prevents
+# a failed table lookup from falling back to the VPS main IPv6 route.
+ip -6 route replace unreachable default metric 42760 table "\$table" 2>/dev/null || true
 ip rule del uidrange "\$uid-\$uid" lookup "\$table" 2>/dev/null || true
 ip rule add uidrange "\$uid-\$uid" lookup "\$table" priority 100
 if command -v ip6tables >/dev/null 2>&1; then
