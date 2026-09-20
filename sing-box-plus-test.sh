@@ -1664,8 +1664,9 @@ vpngate_local_socks_test(){
 
 vpngate_scope_prompt(){
   local scope
-  echo "应用范围：1) 直连9 走 VPN Gate；2) WARP9 走 VPN Gate；3) 全部18 走 VPN Gate"
+  echo "应用范围：1) 直连9 走 VPN Gate；2) WARP9 走 VPN Gate；3) 全部18 走 VPN Gate" >&2
   read -rp "选择 (默认1): " scope || return 1
+  scope="$(printf '%s' "$scope" | tr -d '[:space:]')"
   case "${scope:-1}" in
     1|direct) printf '%s' "direct" ;;
     2|warp) printf '%s' "warp" ;;
