@@ -40,6 +40,15 @@ bash amki-vpn.sh
 - `7`：管理手动 SOCKS5 落地。
 - `8`：管理 VPN Gate OpenVPN 落地。
 
+已有旧版本时，请同时更新入口和实现文件（只更新入口不会覆盖目录中已有的旧实现）：
+
+```bash
+curl -fsSL 'https://raw.githubusercontent.com/chengamki-tech/amki-vpn/main/amki-vpn.sh?update=1' -o amki-vpn.sh
+curl -fsSL 'https://raw.githubusercontent.com/chengamki-tech/amki-vpn/main/sing-box-plus.sh?update=1' -o sing-box-plus.sh
+chmod 700 amki-vpn.sh sing-box-plus.sh
+bash amki-vpn.sh
+```
+
 云厂商安全组还必须放行配置中对应的 TCP/UDP 端口。系统防火墙自动放行不等于云安全组已经放行。
 
 ## SOCKS5 落地
