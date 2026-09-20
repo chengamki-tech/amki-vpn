@@ -1,0 +1,7 @@
+# Never commit generated credentials, runtime state, or server output.
+*.env
+*.ovpn
+*.csv
+*.b64
+*.log
+.DS_Store
