@@ -926,10 +926,10 @@ write_config(){
     log:{level:"info", timestamp:true},
     dns:{
       servers:[
-        {type:"https", tag:"dns-cloudflare", server:"1.1.1.1", server_port:443, path:"/dns-query", tls:{enabled:true, server_name:"cloudflare-dns.com"}, detour:"direct"},
-        {type:"https", tag:"dns-cloudflare-alt", server:"1.0.0.1", server_port:443, path:"/dns-query", tls:{enabled:true, server_name:"cloudflare-dns.com"}, detour:"direct"},
-        {type:"https", tag:"dns-google", server:"8.8.8.8", server_port:443, path:"/dns-query", tls:{enabled:true, server_name:"dns.google"}, detour:"direct"},
-        {type:"https", tag:"dns-google-alt", server:"8.8.4.4", server_port:443, path:"/dns-query", tls:{enabled:true, server_name:"dns.google"}, detour:"direct"}
+        {type:"https", tag:"dns-cloudflare", server:"1.1.1.1", server_port:443, path:"/dns-query", tls:{enabled:true, server_name:"cloudflare-dns.com"}},
+        {type:"https", tag:"dns-cloudflare-alt", server:"1.0.0.1", server_port:443, path:"/dns-query", tls:{enabled:true, server_name:"cloudflare-dns.com"}},
+        {type:"https", tag:"dns-google", server:"8.8.8.8", server_port:443, path:"/dns-query", tls:{enabled:true, server_name:"dns.google"}},
+        {type:"https", tag:"dns-google-alt", server:"8.8.4.4", server_port:443, path:"/dns-query", tls:{enabled:true, server_name:"dns.google"}}
       ],
       final:"dns-cloudflare",
       strategy:"prefer_ipv4",
@@ -1571,8 +1571,8 @@ vpngate_write_singbox_config(){
       log:{level:"warn", timestamp:true},
       dns:{
         servers:[
-          {type:"https",tag:"dns-cloudflare",server:"1.1.1.1",server_port:443,path:"/dns-query",tls:{enabled:true,server_name:"cloudflare-dns.com"},detour:"direct"},
-          {type:"https",tag:"dns-google",server:"8.8.8.8",server_port:443,path:"/dns-query",tls:{enabled:true,server_name:"dns.google"},detour:"direct"}
+          {type:"https",tag:"dns-cloudflare",server:"1.1.1.1",server_port:443,path:"/dns-query",tls:{enabled:true,server_name:"cloudflare-dns.com"}},
+          {type:"https",tag:"dns-google",server:"8.8.8.8",server_port:443,path:"/dns-query",tls:{enabled:true,server_name:"dns.google"}}
         ],
         final:"dns-cloudflare",
         strategy:"prefer_ipv4",
