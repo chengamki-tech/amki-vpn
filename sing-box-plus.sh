@@ -1500,6 +1500,9 @@ vpngate_decode_and_sanitize(){
   VPNDIR="$VPNDIR" awk -v dev="$VPNGATE_DEV" -v modern_crypto="$modern_crypto" '
     BEGIN {
       print "client"
+      # The VPN Gate profile uses a stable custom interface name. Explicitly
+      # declare its device type so OpenVPN does not interpret it as tap.
+      print "dev-type tun"
       print "dev " dev
       print "route-nopull"
       print "nobind"
