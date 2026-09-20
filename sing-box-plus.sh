@@ -291,6 +291,7 @@ LANDING_PORT=${LANDING_PORT:-}
 LANDING_USERNAME=${LANDING_USERNAME:-}
 LANDING_PASSWORD=${LANDING_PASSWORD:-}
 LANDING_SCOPE=${LANDING_SCOPE:-direct}
+SOCKS5_LAST_ERROR=""
 
 # VPN Gate / OpenVPN 落地
 VPNDIR=${VPNDIR:-$SB_DIR/vpngate}
@@ -715,7 +716,7 @@ ensure_warpcli_proxy(){
   fi
 
   # 真正测试 warp=on
-  if ! curl -fsSL --proxy "socks5://${WARP_SOCKS_HOST}:${WARP_SOCKS_PORT}" https://cloudflare.com/cdn-cgi/trace | grep -q "warp=on"; then
+  if ! curl -fsSL --noproxy "" --proxy "socks5h://${WARP_SOCKS_HOST}:${WARP_SOCKS_PORT}" https://cloudflare.com/cdn-cgi/trace | grep -q "warp=on"; then
     err "WARP 代理测试失败：未检测到 warp=on"
     warp-cli status || true
     return 1
@@ -1134,7 +1135,7 @@ banner(){
   clear >/dev/null 2>&1 || true
   hr
   echo -e " ${C_CYAN}🚀 ${SCRIPT_NAME} ${SCRIPT_VERSION} 🚀${C_RESET}"
-  echo -e "${C_CYAN} 脚本更新地址: https://github.com/chengamki-tech/vps${C_RESET}"
+  echo -e "${C_CYAN} 脚本更新地址: https://github.com/chengamki-tech/amki-vpn${C_RESET}"
 
   hr
   echo -e "系统加速状态：$(bbr_state)"
@@ -1229,18 +1230,26 @@ ensure_installed_or_hint(){
 
 # 通过远端 DNS 解析并验证 SOCKS5，避免把不可用出口写进主配置。
 socks5_probe(){
-  local host="$1" port="$2" user="${3:-}" pass="${4:-}" proxy_host proxy url value
+  local host="$1" port="$2" user="${3:-}" pass="${4:-}" proxy_host proxy url value err_file
   proxy_host="$(fmt_host_for_uri "$host")"
   proxy="socks5h://${proxy_host}:${port}"
-  local args=(--silent --show-error --location --max-time 15 --proxy "$proxy")
+  SOCKS5_LAST_ERROR=""
+  err_file="$(mktemp)" || return 1
+  local args=(--silent --show-error --fail --location --noproxy "" --connect-timeout 8 --max-time 20 --proxy "$proxy")
   [[ -n "$user" ]] && args+=(--proxy-user "${user}:${pass}")
   for url in https://api.ipify.org https://ifconfig.me/ip https://www.cloudflare.com/cdn-cgi/trace; do
-    value="$(curl "${args[@]}" "$url" 2>/dev/null || true)"
+    value="$(curl "${args[@]}" "$url" 2>"$err_file" | tr -d '\r' | head -n1 || true)"
     if [[ "$url" == *cloudflare* ]]; then
       value="$(printf '%s\n' "$value" | sed -n 's/^ip=//p' | head -n1)"
     fi
-    [[ -n "$value" ]] && { printf '%s' "$value"; return 0; }
+    if [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || "$value" == *:* ]]; then
+      rm -f "$err_file"
+      printf '%s' "$value"
+      return 0
+    fi
   done
+  SOCKS5_LAST_ERROR="$(tail -n1 "$err_file" 2>/dev/null || true)"
+  rm -f "$err_file"
   return 1
 }
 
@@ -1340,7 +1349,7 @@ configure_landing(){
   }
   info "正在测试 SOCKS5 落地连通性 ..."
   if ! ip="$(socks5_probe "$phost" "$pport" "$puser" "$ppass")"; then
-    warn "SOCKS5 预检失败：未修改现有配置，请检查地址、端口、认证和落地机防火墙"
+    warn "SOCKS5 预检失败：未修改现有配置，请检查地址、端口、认证和落地机防火墙${SOCKS5_LAST_ERROR:+；${SOCKS5_LAST_ERROR}}"
     read -rp "回车返回..." _ || true
     return 0
   fi
@@ -1472,7 +1481,7 @@ vpngate_select_server(){
 }
 
 vpngate_decode_and_sanitize(){
-  local raw="$VPNDIR/server.ovpn" ovpn="$VPNDIR/current.ovpn"
+  local raw="$VPNDIR/server.ovpn" ovpn="$VPNDIR/current.ovpn" modern_crypto=0
   if ! (base64 -d < "$VPNDIR/server.b64" > "$raw" 2>/dev/null || base64 --decode < "$VPNDIR/server.b64" > "$raw" 2>/dev/null); then
     warn "VPN Gate OpenVPN 配置解码失败"
     return 1
@@ -1482,8 +1491,13 @@ vpngate_decode_and_sanitize(){
   grep -q '<cert>' "$raw" || { warn "OpenVPN 配置缺少客户端证书"; return 1; }
   grep -q '<key>' "$raw" || { warn "OpenVPN 配置缺少客户端私钥"; return 1; }
 
+  # Ubuntu 20.04 commonly ships OpenVPN 2.4, which rejects data-ciphers.
+  if openvpn --version 2>/dev/null | awk 'NR == 1 { split($2, v, "."); exit !(v[1] > 2 || (v[1] == 2 && v[2] >= 5)) }'; then
+    modern_crypto=1
+  fi
+
   # VPN Gate 配置来自公网，剥离可执行/路由覆盖指令，再追加受控策略路由。
-  VPNDIR="$VPNDIR" awk -v dev="$VPNGATE_DEV" '
+  VPNDIR="$VPNDIR" awk -v dev="$VPNGATE_DEV" -v modern_crypto="$modern_crypto" '
     BEGIN {
       print "client"
       print "dev " dev
@@ -1498,12 +1512,17 @@ vpngate_decode_and_sanitize(){
     }
     {
       low=tolower($0)
-      if (low ~ /^[[:space:]]*(dev|up|down|route-up|route-pre-down|plugin|script-security|daemon|log|log-append|writepid|user|group|chroot|cd|config|askpass|auth-user-pass|management|route|route-ipv6|redirect-gateway|pull-filter|iproute|setenv[[:space:]]+opt)[[:space:]]/) next
+      if (low ~ /^[[:space:]]*(dev|up|down|route-up|route-pre-down|plugin|script-security|daemon|log|log-append|writepid|user|group|chroot|cd|config|askpass|auth-user-pass|management|route|route-ipv6|redirect-gateway|pull-filter|iproute|setenv[[:space:]]+opt|data-ciphers|data-ciphers-fallback|ncp-ciphers)[[:space:]]/) next
       print
     }
     END {
-      print "data-ciphers AES-128-CBC:AES-256-CBC:AES-128-GCM:AES-256-GCM"
-      print "data-ciphers-fallback AES-128-CBC"
+      if (modern_crypto) {
+        print "data-ciphers AES-128-CBC:AES-256-CBC:AES-128-GCM:AES-256-GCM"
+        print "data-ciphers-fallback AES-128-CBC"
+      } else {
+        print "ncp-ciphers AES-128-CBC:AES-256-CBC"
+        print "cipher AES-128-CBC"
+      }
       print "script-security 2"
       print "route-up " ENVIRON["VPNDIR"] "/route-up.sh"
       print "down " ENVIRON["VPNDIR"] "/route-down.sh"
@@ -1637,10 +1656,7 @@ vpngate_wait_tunnel(){
 }
 
 vpngate_local_socks_test(){
-  local ip=""
-  ip="$(curl -fsSL --max-time 20 --proxy "socks5h://127.0.0.1:${VPNGATE_SOCKS_PORT}" https://api.ipify.org 2>/dev/null || true)"
-  [[ -n "$ip" ]] || ip="$(curl -fsSL --max-time 20 --proxy "socks5h://127.0.0.1:${VPNGATE_SOCKS_PORT}" https://ifconfig.me 2>/dev/null || true)"
-  printf '%s' "$ip"
+  socks5_probe 127.0.0.1 "$VPNGATE_SOCKS_PORT"
 }
 
 vpngate_scope_prompt(){

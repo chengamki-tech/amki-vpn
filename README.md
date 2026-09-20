@@ -28,7 +28,7 @@ chmod 700 amki-vpn.sh
 bash amki-vpn.sh
 ```
 
-选择 `1) 安装/部署（18 节点）`。脚本会安装依赖、生成凭据和证书、部署 WARP、生成配置、校验配置并启动 systemd 服务。启动失败会直接报错，不会输出看似成功的分享链接。
+`amki-vpn.sh` 是自举入口：如果目录里没有实现文件，会自动下载同仓库的 `sing-box-plus.sh` 后再启动。选择 `1) 安装/部署（18 节点）`。脚本会安装依赖、生成凭据和证书、部署 WARP、生成配置、校验配置并启动 systemd 服务。启动失败会直接报错，不会输出看似成功的分享链接。
 
 安装完成后再次执行 `bash amki-vpn.sh`：
 
@@ -53,7 +53,7 @@ bash amki-vpn.sh
 菜单 `7` 会：
 
 1. 校验地址、端口和应用范围。
-2. 使用 `socks5h` 进行真实出口测试，让远端代理负责域名解析。
+2. 使用强制代理的 `socks5h` 进行真实出口测试，让远端代理负责域名解析；同时清空 `NO_PROXY`，避免测试误走 VPS 直连。
 3. 测试通过后才写入主配置。
 4. 校验并重启 sing-box；失败时恢复旧状态。
 
@@ -72,6 +72,7 @@ VPN Gate 提供 OpenVPN 配置，不是 SOCKS5。脚本将其封装为仅监听 
 - 从 VPN Gate API 下载列表，并清理 CRLF、无效 Base64 和缺少证书的记录。
 - 移除公网配置中的脚本、路由覆盖和管理入口，只保留受控 OpenVPN 参数。
 - OpenVPN 使用独立服务；本地 sing-box 使用 `vpngate` 系统用户。
+- 自动兼容 OpenVPN 2.4 与 2.5+ 的加密参数，避免 Ubuntu 20.04 上因不识别 `data-ciphers` 启动失败。
 - 仅 `vpngate` 用户匹配独立路由表，SSH 和 VPS 默认路由不经过 VPN。
 - IPv6 对 `vpngate` 用户拒绝，避免 VPN Gate 没有 IPv6 隧道时泄漏。
 - 节点失败时自动尝试最多 5 个候选；全部失败会停止失效链路并恢复直连/WARP。
@@ -106,6 +107,12 @@ journalctl -u openvpn-vpngate -u sing-box-vpngate -n 120 --no-pager
 ip rule
 ip route show table 100
 ss -lntup | grep -E 'sing-box|11080'
+
+# 直接验证手动 SOCKS5（把地址、端口和凭据替换成实际值）
+curl --noproxy "" --proxy socks5h://USER:PASSWORD@HOST:PORT https://api.ipify.org
+
+# 验证 VPN Gate 本地 SOCKS5
+curl --noproxy "" --proxy socks5h://127.0.0.1:11080 https://api.ipify.org
 ```
 
 ## 原生仓库发布
