@@ -1580,7 +1580,9 @@ vpngate_write_singbox_config(){
       },
       inbounds:[{type:"mixed", tag:"mixed-in", listen:"127.0.0.1", listen_port:$port}],
       outbounds:[{type:"direct", tag:"direct"}],
-      route:{auto_detect_interface:true,default_domain_resolver:"dns-cloudflare",final:"direct"}
+      # Let Linux policy routing select vpngate0 for this service user. An
+      # explicit auto-detected interface would pin traffic to the VPS NIC.
+      route:{default_domain_resolver:"dns-cloudflare",final:"direct"}
     }
   ' > "$VPNDIR/sing-box.json"
   chmod 644 "$VPNDIR/sing-box.json"
@@ -1682,7 +1684,9 @@ vpngate_stop_services(){
 }
 
 vpngate_start_selected(){
+  local baseline_ip
   VPNGATE_TEST_IP=""
+  baseline_ip="$(get_ip4)"
   vpngate_write_route_scripts
   vpngate_write_singbox_config
   vpngate_write_services || return 1
@@ -1705,7 +1709,13 @@ vpngate_start_selected(){
   for i in {1..20}; do
     if ss -lnt 2>/dev/null | grep -Eq "127\\.0\\.0\\.1:${VPNGATE_SOCKS_PORT}[[:space:]]"; then
       VPNGATE_TEST_IP="$(vpngate_local_socks_test)"
-      [[ -n "$VPNGATE_TEST_IP" ]] && return 0
+      if [[ -n "$VPNGATE_TEST_IP" ]]; then
+        if [[ "$VPNGATE_TEST_IP" == "$baseline_ip" || "$VPNGATE_TEST_IP" == "$VPNGATE_IP" ]]; then
+          warn "VPN Gate SOCKS5 已监听，但出口仍是 VPS（${VPNGATE_TEST_IP}），拒绝应用旁路链路"
+          return 1
+        fi
+        return 0
+      fi
     fi
     sleep 1
   done
