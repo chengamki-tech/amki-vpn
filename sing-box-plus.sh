@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #  Sing-Box-Plus 原生管理脚本（18 节点：直连 9 + WARP 9）
-#  Version: v4.0.0
+#  Version: v4.1.0
 #  Project: native deployment for mainland-China network conditions
 # ============================================================
 
@@ -291,6 +291,8 @@ LANDING_PORT=${LANDING_PORT:-}
 LANDING_USERNAME=${LANDING_USERNAME:-}
 LANDING_PASSWORD=${LANDING_PASSWORD:-}
 LANDING_SCOPE=${LANDING_SCOPE:-direct}
+LANDING_DOMAIN_FILE=${LANDING_DOMAIN_FILE:-$SB_DIR/landing-domains.txt}
+LANDING_DOMAINS=()
 SOCKS5_LAST_ERROR=""
 
 # VPN Gate / OpenVPN 落地
@@ -309,7 +311,7 @@ VPNGATE_SCORE=${VPNGATE_SCORE:-}
 
 # 常量
 SCRIPT_NAME="amki-vpn"
-SCRIPT_VERSION="v4.0.0"
+SCRIPT_VERSION="v4.1.0"
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
 REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
 GRPC_SERVICE=${GRPC_SERVICE:-grpc}
@@ -550,6 +552,54 @@ save_landing(){
   chmod 600 "$SB_DIR/landing.env" 2>/dev/null || true
 }
 load_landing(){ safe_source_env "$SB_DIR/landing.env" || return 0; }
+
+normalize_landing_domain(){
+  local domain="$1"
+  domain="${domain,,}"
+  domain="$(printf '%s' "$domain" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
+  domain="${domain#\*.}"
+  domain="${domain#.}"
+  printf '%s' "$domain"
+}
+
+validate_landing_domain(){
+  local domain="$1" label
+  [[ -n "$domain" && ${#domain} -le 253 ]] || return 1
+  [[ "$domain" != *..* && "$domain" != .* && "$domain" != *. ]] || return 1
+  [[ "$domain" == *.* ]] || return 1
+  local IFS=.
+  read -ra labels <<< "$domain"
+  for label in "${labels[@]}"; do
+    [[ ${#label} -le 63 ]] || return 1
+    [[ "$label" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || return 1
+  done
+}
+
+load_landing_domains(){
+  LANDING_DOMAINS=()
+  [[ -f "$LANDING_DOMAIN_FILE" ]] || return 0
+  local raw domain
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    raw="${raw%%#*}"
+    domain="$(normalize_landing_domain "$raw")"
+    validate_landing_domain "$domain" || continue
+    LANDING_DOMAINS+=("$domain")
+  done < "$LANDING_DOMAIN_FILE"
+  if ((${#LANDING_DOMAINS[@]} > 1)); then
+    mapfile -t LANDING_DOMAINS < <(printf '%s\n' "${LANDING_DOMAINS[@]}" | LC_ALL=C sort -u)
+  fi
+}
+
+save_landing_domains(){
+  mkdir -p "$(dirname "$LANDING_DOMAIN_FILE")"
+  local tmp
+  tmp="$(mktemp "${LANDING_DOMAIN_FILE}.tmp.XXXXXX")" || return 1
+  if ((${#LANDING_DOMAINS[@]} > 0)); then
+    printf '%s\n' "${LANDING_DOMAINS[@]}" | LC_ALL=C sort -u > "$tmp"
+  fi
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$LANDING_DOMAIN_FILE"
+}
 
 # ===== VPN Gate 元数据 =====
 save_vpngate_meta(){
@@ -878,11 +928,14 @@ systemctl enable "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
 
 # ===== 写 config.json（使用你提供的稳定配置逻辑） =====
 write_config(){
-  ensure_dirs; load_env || true; load_creds || true; load_ports || true; load_landing || true
+  ensure_dirs; load_env || true; load_creds || true; load_ports || true; load_landing || true; load_landing_domains
   ensure_creds; save_all_ports; mk_cert
   [[ "$ENABLE_WARP" == "true" ]] && ensure_warpcli_proxy
 
-  local CRT="$CERT_DIR/fullchain.pem" KEY="$CERT_DIR/key.pem" conf_tmp
+  local CRT="$CERT_DIR/fullchain.pem" KEY="$CERT_DIR/key.pem" conf_tmp landing_domains_json='[]'
+  if ((${#LANDING_DOMAINS[@]} > 0)); then
+    landing_domains_json="$(printf '%s\n' "${LANDING_DOMAINS[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')"
+  fi
   conf_tmp="$(mktemp "${CONF_JSON}.tmp.XXXXXX")" || return 1
   if ! jq -n \
   --arg RS "$REALITY_SERVER" --argjson RSP "${REALITY_SERVER_PORT:-443}" --arg UID "$UUID" \
@@ -901,6 +954,7 @@ write_config(){
   --arg ENABLE_LANDING "$ENABLE_LANDING" \
   --arg LHOST "$LANDING_HOST" --argjson LPORT "${LANDING_PORT:-0}" \
   --arg LUSER "$LANDING_USERNAME" --arg LPASS "$LANDING_PASSWORD" --arg LSCOPE "$LANDING_SCOPE" \
+  --argjson LDOMAINS "$landing_domains_json" \
   '
   def inbound_vless($port): {type:"vless", listen:"::", listen_port:$port, users:[{uuid:$UID}], tls:{enabled:true, server_name:$RS, reality:{enabled:true, handshake:{server:$RS, server_port:$RSP}, private_key:$RPR, short_id:[$SID]}}};
   def inbound_vless_flow($port): {type:"vless", listen:"::", listen_port:$port, users:[{uuid:$UID, flow:"xtls-rprx-vision"}], tls:{enabled:true, server_name:$RS, reality:{enabled:true, handshake:{server:$RS, server_port:$RSP}, private_key:$RPR, short_id:[$SID]}}};
@@ -965,7 +1019,10 @@ write_config(){
       auto_detect_interface:true,
       default_domain_resolver:"dns-cloudflare",
       rules: (
-        (if landing_active and ($LSCOPE=="direct" or $LSCOPE=="all") then
+        (if landing_active and ($LDOMAINS|length)>0 then
+          [{domain_suffix:$LDOMAINS, outbound:"landing"}]
+        else [] end)
+        + (if landing_active and ($LSCOPE=="direct" or $LSCOPE=="all") then
           [{inbound:direct_tags, outbound:"landing"}]
         else [] end)
         + (if landing_active and ($LSCOPE=="warp" or $LSCOPE=="all") then
@@ -1035,7 +1092,7 @@ open_firewall(){
 
 # ===== 分享链接（分组输出 + 提示） =====
 print_links_grouped(){
-  load_env; load_creds; load_ports; load_landing || true
+  load_env; load_creds; load_ports; load_landing || true; load_landing_domains
   local mode="${1:-4}" ip host
   if [[ "$mode" == "6" ]]; then
     ip="$(get_ip6)"
@@ -1095,6 +1152,9 @@ JSON
   echo -e "${C_CYAN}${C_BOLD}【${warp_label}】${C_RESET}（同上 9 种，带 -warp）"
   if [[ "$ENABLE_LANDING" == "true" ]]; then
     echo -e "${C_DIM}说明：SOCKS5 落地出口 ${LANDING_HOST}:${LANDING_PORT}，应用范围 ${LANDING_SCOPE}${C_RESET}"
+    if ((${#LANDING_DOMAINS[@]} > 0)); then
+      echo -e "${C_DIM}域名分流：${#LANDING_DOMAINS[@]} 条规则优先走 SOCKS5；未匹配域名按节点类型走 VPS/WARP${C_RESET}"
+    fi
   else
     echo -e "${C_DIM}说明：带 -warp 的 9 个节点走 Cloudflare WARP 出口，流媒体解锁更友好${C_RESET}"
   fi
@@ -1121,8 +1181,11 @@ sb_service_state(){
 }
 landing_state(){
   load_landing || true
+  load_landing_domains
   if [[ "$ENABLE_LANDING" == "true" && -n "${LANDING_HOST:-}" && -n "${LANDING_PORT:-}" ]]; then
-    echo -e "${C_GREEN}已启用（SOCKS5 ${LANDING_HOST}:${LANDING_PORT}，范围 ${LANDING_SCOPE}）${C_RESET}"
+    local domain_note=""
+    ((${#LANDING_DOMAINS[@]} > 0)) && domain_note=", 域名 ${#LANDING_DOMAINS[@]} 条"
+    echo -e "${C_GREEN}已启用（SOCKS5 ${LANDING_HOST}:${LANDING_PORT}，范围 ${LANDING_SCOPE}${domain_note}）${C_RESET}"
   else
     echo -e "${C_DIM}未启用${C_RESET}"
   fi
@@ -1305,6 +1368,101 @@ landing_apply(){
   return 0
 }
 
+landing_social_domain_defaults(){
+  LANDING_DOMAINS=(
+    # AI services
+    openai.com chatgpt.com chat.openai.com oaistatic.com oaiusercontent.com
+    anthropic.com claude.ai perplexity.ai perplexity.com
+    gemini.google.com generativelanguage.googleapis.com aistudio.google.com
+    copilot.microsoft.com
+    # Social and communication services
+    x.com twitter.com t.co twimg.com
+    facebook.com fbcdn.net instagram.com cdninstagram.com threads.net
+    reddit.com redditstatic.com discord.com discordapp.com discordapp.net
+    telegram.org t.me youtube.com ytimg.com googlevideo.com
+    tiktok.com tiktokcdn.com linkedin.com licdn.com
+  )
+}
+
+show_landing_domains(){
+  load_landing_domains
+  if ((${#LANDING_DOMAINS[@]} == 0)); then
+    echo "（未设置域名规则）"
+    return 0
+  fi
+  printf '  %s\n' "${LANDING_DOMAINS[@]}"
+}
+
+landing_domains_apply(){
+  local -a old_domains=("${LANDING_DOMAINS[@]}")
+  if ! save_landing_domains || ! write_config; then
+    LANDING_DOMAINS=("${old_domains[@]}")
+    save_landing_domains || true
+    write_config >/dev/null 2>&1 || true
+    warn "域名规则写入失败，已回滚"
+    return 1
+  fi
+
+  if ! ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true "$BIN_PATH" check -c "$CONF_JSON" || \
+     ! systemctl restart "${SYSTEMD_SERVICE}"; then
+    warn "域名规则校验或重启失败，正在回滚"
+    LANDING_DOMAINS=("${old_domains[@]}")
+    save_landing_domains || true
+    write_config >/dev/null 2>&1 || true
+    systemctl restart "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
+    return 1
+  fi
+  return 0
+}
+
+parse_landing_domain_input(){
+  local input="$1" token domain
+  local -a tokens=()
+  LANDING_DOMAINS=()
+  input="${input//,/ }"
+  read -ra tokens <<< "$input"
+  for token in "${tokens[@]}"; do
+    domain="$(normalize_landing_domain "$token")"
+    if ! validate_landing_domain "$domain"; then
+      warn "忽略无效域名：$token（仅支持 example.com 或 *.example.com）"
+      continue
+    fi
+    LANDING_DOMAINS+=("$domain")
+  done
+  if ((${#LANDING_DOMAINS[@]} > 1)); then
+    mapfile -t LANDING_DOMAINS < <(printf '%s\n' "${LANDING_DOMAINS[@]}" | LC_ALL=C sort -u)
+  fi
+}
+
+configure_landing_domains(){
+  ensure_installed_or_hint || return 0
+  load_landing || true
+  load_landing_domains
+  if [[ "$ENABLE_LANDING" != "true" ]]; then
+    warn "请先配置并启用 SOCKS5 落地，再设置域名分流"
+    read -rp "回车返回..." _ || true
+    return 0
+  fi
+
+  echo
+  info "当前域名会优先走 SOCKS5；未匹配域名保持原有路由：直连节点走 VPS，-warp 节点走 WARP。"
+  echo "当前规则："
+  show_landing_domains
+  echo "输入多个域名时用空格或逗号分隔；输入 social 使用推荐的 AI/社交媒体列表；输入 clear 清空规则。"
+  local input
+  read -rp "域名规则: " input || return 0
+  case "${input,,}" in
+    social|default|recommended|推荐) landing_social_domain_defaults ;;
+    clear|none|off|清空) LANDING_DOMAINS=() ;;
+    *) parse_landing_domain_input "$input" ;;
+  esac
+
+  if landing_domains_apply; then
+    ok "域名分流已更新，共 ${#LANDING_DOMAINS[@]} 条；匹配域名将走 SOCKS5"
+  fi
+  read -rp "回车返回..." _ || true
+}
+
 configure_landing(){
   ensure_installed_or_hint || return 0
   load_landing || true
@@ -1400,6 +1558,7 @@ manage_landing_menu(){
     echo -e "  ${C_GREEN}1)${C_RESET} 配置/修改 SOCKS5 落地代理"
     echo -e "  ${C_GREEN}2)${C_RESET} 测试 SOCKS5 落地出口 IP"
     echo -e "  ${C_YELLOW}3)${C_RESET} 关闭 SOCKS5 落地出口"
+    echo -e "  ${C_GREEN}4)${C_RESET} 配置按域名分流到 SOCKS5"
     echo -e "  ${C_RED}0)${C_RESET} 返回主菜单"
     hr
     read -rp "选择: " answer || return 0
@@ -1407,6 +1566,7 @@ manage_landing_menu(){
       1) configure_landing ;;
       2) test_landing ;;
       3) disable_landing ;;
+      4) configure_landing_domains ;;
       0|"") return 0 ;;
     esac
   done

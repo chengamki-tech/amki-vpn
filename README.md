@@ -7,6 +7,7 @@
 ## 特性
 
 - 18 个入站：直连 9 + WARP 9。
+- 支持按域名分流：AI、X 和社交媒体域名可优先走 SOCKS5；未匹配域名按客户端选择的节点走 VPS 或 WARP。
 - VLESS Reality、VLESS gRPC Reality、Trojan Reality、VMess WS、Hysteria2、Hysteria2 salamander、Shadowsocks、TUIC v5。
 - 使用 IP 直连的 DoH，并通过 TLS SNI 校验证书，避免依赖易受污染的 DNS 解析。
 - 默认优先 IPv4；VPN Gate 落地用户单独使用策略路由，IPv6 流量拒绝，不改写 VPS 默认路由。
@@ -67,6 +68,17 @@ bash amki-vpn.sh
 4. 校验并重启 sing-box；失败时恢复旧状态。
 
 落地凭据保存在 `/opt/sing-box/landing.env`，权限为 `600`。建议远端代理只允许 VPS 公网 IP 访问。
+
+### 按域名分流
+
+在菜单 `7 -> 4` 配置域名规则：
+
+- 输入 `social` 使用内置的 AI、X、Facebook、Instagram、Threads、Reddit、Discord、Telegram、YouTube、TikTok、LinkedIn 等推荐列表。
+- 也可以输入自定义域名，多个域名用空格或逗号分隔；`*.example.com` 会按后缀匹配主域名及其子域名。
+- 匹配域名优先走 SOCKS5；未匹配域名保持原有节点语义：直连 9 走 VPS，`-warp` 9 走 Cloudflare WARP。
+- VPS 的 SSH、系统服务和 OpenVPN 默认路由不被修改；域名规则只作用于经 sing-box 入站的客户端流量。
+
+规则保存在 `/opt/sing-box/landing-domains.txt`，每行一个域名。脚本会在写入前校验配置并重启服务，失败自动回滚。
 
 ## VPN Gate 落地
 
