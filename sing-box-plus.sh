@@ -6,6 +6,7 @@
 # ============================================================
 
 set -Eeuo pipefail
+SCRIPT_ARGS=("$@")
 
 stty erase ^H 2>/dev/null || true # 让退格键在终端里正常工作
 # ===== [BEGIN] SBP 引导模块 v2.2.0+（包管理器优先 + 二进制回退） =====
@@ -325,7 +326,8 @@ VPNGATE_SCORE=${VPNGATE_SCORE:-}
 
 # 常量
 SCRIPT_NAME="amki-vpn"
-SCRIPT_VERSION="v4.2.0"
+SCRIPT_VERSION="v4.2.1"
+SCRIPT_UPDATE_URL=${AMKI_VPN_SCRIPT_URL:-https://raw.githubusercontent.com/chengamki-tech/amki-vpn/main/sing-box-plus.sh}
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
 REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
 GRPC_SERVICE=${GRPC_SERVICE:-grpc}
@@ -355,6 +357,65 @@ install_amkivpn_command(){
   [[ -n "$script_path" && -f "$script_path" ]] || return 0
   ln -sfn "$script_path" /usr/local/bin/amkivpn
   chmod 0755 "$script_path" /usr/local/bin/amkivpn 2>/dev/null || true
+}
+
+script_update_path(){
+  local path="${BASH_SOURCE[0]:-}"
+  [[ -f "$path" ]] || return 1
+  if command -v readlink >/dev/null 2>&1; then
+    path="$(readlink -f "$path" 2>/dev/null || true)"
+  fi
+  [[ -f "$path" ]] || return 1
+  printf '%s\n' "$path"
+}
+
+update_management_script(){
+  local current_path tmp remote_version current_hash remote_hash backup answer
+  [[ "$EUID" -eq 0 ]] || { warn "更新管理脚本需要 root 权限"; return 1; }
+  command -v curl >/dev/null 2>&1 || { warn "缺少 curl，无法下载更新"; return 1; }
+  current_path="$(script_update_path)" || { warn "无法定位当前管理脚本"; return 1; }
+  tmp="$(mktemp "${current_path}.update.XXXXXX")" || { warn "无法创建更新临时文件"; return 1; }
+
+  info "正在检查 GitHub 最新管理脚本..."
+  if ! dl "${SCRIPT_UPDATE_URL}?update=$(date +%s)" "$tmp"; then
+    rm -f "$tmp"
+    warn "更新下载失败：${SCRIPT_UPDATE_URL}"
+    return 1
+  fi
+  chmod 700 "$tmp"
+  if ! grep -q '^SCRIPT_NAME="amki-vpn"$' "$tmp" || ! grep -q '^SCRIPT_VERSION="v[0-9]' "$tmp" || ! bash -n "$tmp"; then
+    rm -f "$tmp"
+    warn "下载的文件不是有效 amki-vpn 脚本，已放弃更新"
+    return 1
+  fi
+  remote_version="$(sed -n 's/^SCRIPT_VERSION="\([^"]*\)"$/\1/p' "$tmp" | head -n1)"
+  current_hash="$(sha256sum "$current_path" 2>/dev/null | awk '{print $1}' || true)"
+  remote_hash="$(sha256sum "$tmp" 2>/dev/null | awk '{print $1}' || true)"
+  echo "  当前版本：${SCRIPT_VERSION}"
+  echo "  最新版本：${remote_version:-未知}"
+  echo "  当前哈希：${current_hash:-未读取}"
+  echo "  下载哈希：${remote_hash:-未读取}"
+
+  if [[ -n "$current_hash" && "$current_hash" == "$remote_hash" ]]; then
+    rm -f "$tmp"
+    ok "当前管理脚本已经是最新版本"
+    return 0
+  fi
+  read -rp "输入 UPDATE 确认替换管理脚本（其他输入取消）: " answer || answer=""
+  if [[ "$answer" != "UPDATE" ]]; then
+    rm -f "$tmp"
+    info "已取消脚本更新"
+    return 0
+  fi
+
+  backup="${current_path}.bak.$(date +%Y%m%d%H%M%S)"
+  cp -a "$current_path" "$backup" || { rm -f "$tmp"; warn "无法创建旧脚本备份"; return 1; }
+  mv -f "$tmp" "$current_path"
+  chmod 700 "$current_path"
+  install_amkivpn_command || true
+  ok "管理脚本已更新到 ${remote_version:-最新版本}，旧版本备份：${backup}"
+  info "正在重新加载管理面板..."
+  exec "$current_path" "${SCRIPT_ARGS[@]}"
 }
 
 # --- 架构映射：uname -m -> 发行资产名 ---
@@ -1698,6 +1759,7 @@ banner(){
   echo -e "  ${C_RED}9)${C_RESET} 卸载"
   echo -e "  ${C_RED}10)${C_RESET} 退出"
   echo -e "  ${C_GREEN}11)${C_RESET} VPS 体检/测速/回程/解锁"
+  echo -e "  ${C_GREEN}12)${C_RESET} 更新管理脚本"
   echo -e "  ${C_DIM}0)${C_RESET} 退出（兼容键）"
   hr
 }
@@ -2534,6 +2596,7 @@ menu(){
     9) uninstall_all ;; # 直接退出
     10|0) exit 0 ;;
     11) manage_diagnostic_menu; menu ;;
+    12) update_management_script; menu ;;
     *) menu ;;
   esac
 }
