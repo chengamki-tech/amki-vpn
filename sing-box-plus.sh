@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #  Sing-Box-Plus 原生管理脚本（18 节点：直连 9 + WARP 9）
-#  Version: v4.1.8
+#  Version: v4.2.2
 #  Project: native deployment for mainland-China network conditions
 # ============================================================
 
@@ -326,8 +326,9 @@ VPNGATE_SCORE=${VPNGATE_SCORE:-}
 
 # 常量
 SCRIPT_NAME="amki-vpn"
-SCRIPT_VERSION="v4.2.1"
+SCRIPT_VERSION="v4.2.2"
 SCRIPT_UPDATE_URL=${AMKI_VPN_SCRIPT_URL:-https://raw.githubusercontent.com/chengamki-tech/amki-vpn/main/sing-box-plus.sh}
+SCRIPT_UPDATE_REF_API_URL=${AMKI_VPN_SCRIPT_REF_API_URL:-https://api.github.com/repos/chengamki-tech/amki-vpn/commits/main}
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
 REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
 GRPC_SERVICE=${GRPC_SERVICE:-grpc}
@@ -370,16 +371,30 @@ script_update_path(){
 }
 
 update_management_script(){
-  local current_path tmp remote_version current_hash remote_hash backup answer
+  local current_path tmp remote_version current_hash remote_hash backup answer remote_ref remote_url
   [[ "$EUID" -eq 0 ]] || { warn "更新管理脚本需要 root 权限"; return 1; }
   command -v curl >/dev/null 2>&1 || { warn "缺少 curl，无法下载更新"; return 1; }
   current_path="$(script_update_path)" || { warn "无法定位当前管理脚本"; return 1; }
   tmp="$(mktemp "${current_path}.update.XXXXXX")" || { warn "无法创建更新临时文件"; return 1; }
 
   info "正在检查 GitHub 最新管理脚本..."
-  if ! dl "${SCRIPT_UPDATE_URL}?update=$(date +%s)" "$tmp"; then
+  remote_url="$SCRIPT_UPDATE_URL"
+  if [[ -z "${AMKI_VPN_SCRIPT_URL:-}" ]]; then
+    remote_ref="$(curl -fsSL --connect-timeout 10 --max-time 30 "$SCRIPT_UPDATE_REF_API_URL" 2>/dev/null \
+      | sed -n 's/^[[:space:]]*"sha": "\([0-9a-f]\{40\}\)".*/\1/p' | head -n1 || true)"
+    if [[ "$remote_ref" =~ ^[0-9a-f]{40}$ ]]; then
+      remote_url="https://raw.githubusercontent.com/chengamki-tech/amki-vpn/${remote_ref}/sing-box-plus.sh"
+      info "已锁定 GitHub 提交：${remote_ref}"
+    else
+      remote_url="${remote_url}?update=$(date +%s)"
+      warn "无法读取 GitHub 提交 SHA，使用带缓存参数的备用地址"
+    fi
+  else
+    remote_url="${remote_url}?update=$(date +%s)"
+  fi
+  if ! dl "$remote_url" "$tmp"; then
     rm -f "$tmp"
-    warn "更新下载失败：${SCRIPT_UPDATE_URL}"
+    warn "更新下载失败：${remote_url}"
     return 1
   fi
   chmod 700 "$tmp"
