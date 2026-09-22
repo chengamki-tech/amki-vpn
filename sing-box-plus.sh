@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #  Sing-Box-Plus 原生管理脚本（18 节点：直连 9 + WARP 9）
-#  Version: v4.1.1
+#  Version: v4.1.2
 #  Project: native deployment for mainland-China network conditions
 # ============================================================
 
@@ -311,7 +311,7 @@ VPNGATE_SCORE=${VPNGATE_SCORE:-}
 
 # 常量
 SCRIPT_NAME="amki-vpn"
-SCRIPT_VERSION="v4.1.1"
+SCRIPT_VERSION="v4.1.2"
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
 REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
 GRPC_SERVICE=${GRPC_SERVICE:-grpc}
@@ -1152,7 +1152,7 @@ JSON
   hr
   echo -e "${C_CYAN}${C_BOLD}【${warp_label}】${C_RESET}（同上 9 种，带 -warp）"
   if [[ "$ENABLE_LANDING" == "true" ]]; then
-    echo -e "${C_DIM}说明：SOCKS5 落地出口 ${LANDING_HOST}:${LANDING_PORT}，应用范围 ${LANDING_SCOPE}${C_RESET}"
+    echo -e "${C_DIM}说明：SOCKS5 落地出口 ${LANDING_HOST}:${LANDING_PORT}，应用范围 $(landing_scope_label "$LANDING_SCOPE")${C_RESET}"
     if ((${#LANDING_DOMAINS[@]} > 0)); then
       echo -e "${C_DIM}域名分流：${#LANDING_DOMAINS[@]} 条规则优先走 SOCKS5；未匹配域名按节点类型走 VPS/WARP${C_RESET}"
     fi
@@ -1186,7 +1186,7 @@ landing_state(){
   if [[ "$ENABLE_LANDING" == "true" && -n "${LANDING_HOST:-}" && -n "${LANDING_PORT:-}" ]]; then
     local domain_note=""
     ((${#LANDING_DOMAINS[@]} > 0)) && domain_note=", 域名 ${#LANDING_DOMAINS[@]} 条"
-    echo -e "${C_GREEN}已启用（SOCKS5 ${LANDING_HOST}:${LANDING_PORT}，范围 ${LANDING_SCOPE}${domain_note}）${C_RESET}"
+    echo -e "${C_GREEN}已启用（SOCKS5 ${LANDING_HOST}:${LANDING_PORT}，范围 $(landing_scope_label "$LANDING_SCOPE")${domain_note}）${C_RESET}"
   else
     echo -e "${C_DIM}未启用${C_RESET}"
   fi
@@ -1323,7 +1323,17 @@ validate_landing_input(){
   [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 )) || {
     warn "落地端口必须是 1-65535"; return 1;
   }
-  case "$scope" in direct|warp|all) ;; *) warn "应用范围无效"; return 1 ;; esac
+  case "$scope" in direct|warp|all|domain) ;; *) warn "应用范围无效"; return 1 ;; esac
+}
+
+landing_scope_label(){
+  case "${1:-}" in
+    direct) printf '直连9' ;;
+    warp) printf 'WARP9' ;;
+    all) printf '全部18' ;;
+    domain) printf '仅按域名' ;;
+    *) printf '%s' "${1:-未设置}" ;;
+  esac
 }
 
 landing_apply(){
@@ -1493,12 +1503,13 @@ configure_landing(){
     ppass=""
   fi
 
-  echo "应用范围：1) 直连9 走落地；2) WARP9 走落地；3) 全部18 走落地"
+  echo "应用范围：1) 直连9 走落地；2) WARP9 走落地；3) 全部18 走落地；4) 仅按域名走落地"
   read -rp "选择 (默认1): " pscope || return 0
   case "${pscope:-1}" in
     1|direct) pscope="direct" ;;
     2|warp) pscope="warp" ;;
     3|all) pscope="all" ;;
+    4|domain) pscope="domain" ;;
     *) warn "范围无效"; return 0 ;;
   esac
 
