@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #  Sing-Box-Plus 原生管理脚本（18 节点：直连 9 + WARP 9）
-#  Version: v4.1.7
+#  Version: v4.1.8
 #  Project: native deployment for mainland-China network conditions
 # ============================================================
 
@@ -150,10 +150,10 @@ sbp_install_prereqs_pm() {
   sbp_pm_refresh
 
   case "$PM" in
-    apt)    CORE=(curl jq tar unzip openssl); EXTRA=(ca-certificates xz-utils uuid-runtime iproute2 iptables ufw) ;;
-    dnf|yum)CORE=(curl jq tar unzip openssl); EXTRA=(ca-certificates xz util-linux iproute iptables iptables-nft firewalld) ;;
-    pacman) CORE=(curl jq tar unzip openssl); EXTRA=(ca-certificates xz util-linux iproute2 iptables) ;;
-    zypper) CORE=(curl jq tar unzip openssl); EXTRA=(ca-certificates xz util-linux iproute2 iptables firewalld) ;;
+    apt)    CORE=(curl jq tar unzip openssl); EXTRA=(ca-certificates xz-utils uuid-runtime iproute2 procps kmod iptables ufw) ;;
+    dnf|yum)CORE=(curl jq tar unzip openssl); EXTRA=(ca-certificates xz util-linux iproute procps-ng kmod iptables iptables-nft firewalld) ;;
+    pacman) CORE=(curl jq tar unzip openssl); EXTRA=(ca-certificates xz util-linux iproute2 procps-ng kmod iptables) ;;
+    zypper) CORE=(curl jq tar unzip openssl); EXTRA=(ca-certificates xz util-linux iproute2 procps kmod iptables firewalld) ;;
     *) return 1 ;;
   esac
 
@@ -325,7 +325,7 @@ VPNGATE_SCORE=${VPNGATE_SCORE:-}
 
 # 常量
 SCRIPT_NAME="amki-vpn"
-SCRIPT_VERSION="v4.1.7"
+SCRIPT_VERSION="v4.1.8"
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
 REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
 GRPC_SERVICE=${GRPC_SERVICE:-grpc}
@@ -866,7 +866,7 @@ ensure_wgcf_profile(){
 # ===== 依赖与安装 =====
 install_deps(){
   apt-get update -y >/dev/null 2>&1 || true
-  apt-get install -y ca-certificates curl wget jq tar iproute2 openssl coreutils uuid-runtime >/dev/null 2>&1 || true
+  apt-get install -y ca-certificates curl wget jq tar iproute2 procps kmod openssl coreutils uuid-runtime >/dev/null 2>&1 || true
 }
 
 # ===== 安装 / 更新 sing-box（GitHub Releases）=====
@@ -1199,7 +1199,55 @@ JSON
   hr
 }
 
-# ===== 线路优化：BBR / fq / 抗队列拥塞 =====
+# ===== 线路优化：依赖、BBR / fq / 抗队列拥塞 =====
+network_prereqs_ok(){
+  local cmd
+  for cmd in sysctl ip tc modprobe; do
+    command -v "$cmd" >/dev/null 2>&1 || return 1
+  done
+}
+
+network_prereq_report(){
+  local cmd
+  for cmd in sysctl ip tc modprobe; do
+    if command -v "$cmd" >/dev/null 2>&1; then
+      printf '  %-8s %s\n' "$cmd" "已安装：$(command -v "$cmd")"
+    else
+      printf '  %-8s %s\n' "$cmd" "缺失"
+    fi
+  done
+}
+
+ensure_network_prereqs(){
+  [[ "$EUID" -eq 0 ]] || { warn "线路优化依赖需要 root 权限"; return 1; }
+  if network_prereqs_ok; then
+    info "线路优化依赖已就绪"
+    network_prereq_report
+    return 0
+  fi
+
+  local -a packages=()
+  sbp_detect_pm || { warn "找不到包管理器，无法自动安装线路优化依赖"; network_prereq_report; return 1; }
+  case "$PM" in
+    apt) packages=(iproute2 procps kmod) ;;
+    dnf|yum) packages=(iproute procps-ng kmod) ;;
+    pacman) packages=(iproute2 procps-ng kmod) ;;
+    zypper) packages=(iproute2 procps kmod) ;;
+    *) warn "暂不支持通过 ${PM} 自动安装线路优化依赖"; network_prereq_report; return 1 ;;
+  esac
+
+  warn "线路优化缺少系统工具，正在安装：${packages[*]}"
+  sbp_pm_refresh || true
+  sbp_pm_install "${packages[@]}"
+  if ! network_prereqs_ok; then
+    warn "线路优化依赖仍不完整，实际状态如下："
+    network_prereq_report
+    return 1
+  fi
+  ok "线路优化依赖安装完成"
+  network_prereq_report
+}
+
 sysctl_value(){
   sysctl -n "$1" 2>/dev/null || true
 }
@@ -1213,14 +1261,19 @@ network_cc_available(){
   grep -Eq "(^|[[:space:]])${cc}([[:space:]]|$)" /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null
 }
 
+load_bbr_module(){
+  network_cc_available bbr && return 0
+  command -v modprobe >/dev/null 2>&1 || return 1
+  info "正在加载内核模块 tcp_bbr"
+  modprobe tcp_bbr 2>/dev/null || true
+  network_cc_available bbr
+}
+
 write_network_sysctl(){
   local tmp key value cc
   cc="$(sysctl_value net.ipv4.tcp_congestion_control)"
 
-  if ! network_cc_available bbr; then
-    modprobe tcp_bbr 2>/dev/null || true
-  fi
-  if network_cc_available bbr; then
+  if load_bbr_module; then
     cc=bbr
   elif [[ -z "$cc" ]]; then
     cc=cubic
@@ -1267,10 +1320,46 @@ SYSCTL
 
 apply_network_qdisc(){
   local dev
-  command -v tc >/dev/null 2>&1 || return 0
+  command -v tc >/dev/null 2>&1 || return 1
   dev="$(network_default_device)"
-  [[ -n "$dev" && "$dev" != lo && "$dev" =~ ^[a-zA-Z0-9_.:-]+$ ]] || return 0
-  tc qdisc replace dev "$dev" root fq >/dev/null 2>&1 || warn "当前网卡 ${dev} 无法立即切换 fq，将由 sysctl 在后续启动时生效"
+  [[ -n "$dev" && "$dev" != lo && "$dev" =~ ^[a-zA-Z0-9_.:-]+$ ]] || return 1
+  tc qdisc replace dev "$dev" root fq >/dev/null 2>&1 || return 1
+  [[ "$(tc qdisc show dev "$dev" 2>/dev/null | awk 'NR == 1 {print $2}')" == fq ]]
+}
+
+network_active_qdisc(){
+  local dev="$(network_default_device)"
+  [[ -n "$dev" ]] || return 0
+  tc qdisc show dev "$dev" 2>/dev/null | awk 'NR == 1 {print $2}'
+}
+
+verify_network_sysctl(){
+  local key expected actual failed=0
+  [[ -f "$NETWORK_SYSCTL_FILE" ]] || return 1
+  while IFS='=' read -r key expected; do
+    [[ -n "$key" && "$key" != \#* ]] || continue
+    actual="$(sysctl_value "$key")"
+    if [[ "$actual" != "$expected" ]]; then
+      warn "参数未生效：${key}=${actual:-未读取}（期望 ${expected}）"
+      failed=1
+    fi
+  done < "$NETWORK_SYSCTL_FILE"
+  return "$failed"
+}
+
+network_optimization_report(){
+  local cc qdisc dev active
+  cc="$(sysctl_value net.ipv4.tcp_congestion_control)"
+  qdisc="$(sysctl_value net.core.default_qdisc)"
+  dev="$(network_default_device)"
+  active="$(network_active_qdisc)"
+  echo "线路优化验收："
+  network_prereq_report
+  echo "  内核拥塞控制：${cc:-未读取}"
+  echo "  默认 qdisc：${qdisc:-未读取}"
+  echo "  当前网卡：${dev:-未检测到}"
+  echo "  当前 qdisc：${active:-未读取}"
+  echo "  sysctl 配置：${NETWORK_SYSCTL_FILE}"
 }
 
 network_optimization_state(){
@@ -1292,17 +1381,23 @@ network_optimization_state(){
 }
 
 enable_bbr(){
-  [[ "$EUID" -eq 0 ]] || { warn "线路优化需要 root 权限"; return 1; }
+  ensure_network_prereqs || return 1
+  local bbr_available=0 qdisc_ok=0 sysctl_ok=0
+  load_bbr_module && bbr_available=1 || true
   write_network_sysctl || { warn "写入线路优化配置失败"; return 1; }
-  if sysctl --system >/dev/null 2>&1; then
-    apply_network_qdisc
-    ok "线路优化已应用：BBR/fq、TCP Fast Open、MTU 探测、TCP/UDP 缓冲区和连接保活"
+  sysctl --system >/dev/null 2>&1 && sysctl_ok=1 || warn "sysctl 应用命令返回失败"
+  apply_network_qdisc && qdisc_ok=1 || warn "当前网卡 qdisc 未确认切换为 fq"
+  verify_network_sysctl && sysctl_ok=1 || sysctl_ok=0
+  network_optimization_report
+  if ((bbr_available == 1)) && [[ "$(sysctl_value net.ipv4.tcp_congestion_control)" == bbr ]]; then
+    ok "BBR 已确认启用"
   else
-    warn "sysctl 应用部分失败，请检查 ${NETWORK_SYSCTL_FILE}"
-    return 1
+    warn "当前内核未提供可用 BBR；其他可用参数已尝试应用，但不能宣称 BBR 生效"
   fi
-  if ! network_cc_available bbr && [[ "$(sysctl_value net.ipv4.tcp_congestion_control)" != bbr ]]; then
-    warn "当前内核不提供 BBR，已保留可用拥塞控制；升级内核后再次执行本项即可启用"
+  if ((sysctl_ok == 1 && qdisc_ok == 1 && bbr_available == 1)); then
+    ok "线路优化验收通过：BBR、fq 和 sysctl 参数均已读取确认"
+  else
+    warn "线路优化为部分成功，请根据上面的验收结果处理缺失项"
   fi
 }
 

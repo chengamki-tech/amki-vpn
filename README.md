@@ -4,7 +4,7 @@
 
 这是独立维护版本，不依赖上游仓库的运行时文件或配置。协议兼容性、防污染和连接稳定性可以优化，但任何节点都不能保证永久可用，也不承诺绕过所有网络策略或第三方识别。
 
-当前脚本版本：`v4.1.7`。
+当前脚本版本：`v4.1.8`。
 
 安装或运行一次脚本后，可直接执行 `amkivpn` 打开管理面板。该命令会自动指向当前脚本版本。
 
@@ -59,12 +59,13 @@ bash amki-vpn.sh
 
 ## 线路优化与抗 QoS
 
-菜单 `6` 会写入 `/etc/sysctl.d/99-amki-vpn-network.conf` 并立即应用：
+菜单 `6` 会先检查并自动安装 `iproute2/iproute`、`procps`、`kmod`，再写入 `/etc/sysctl.d/99-amki-vpn-network.conf` 并立即应用：
 
 - 优先启用 BBR 与 fq；内核不支持 BBR 时保留当前可用拥塞控制，不会写入无效值。
 - 开启 TCP Fast Open、TCP MTU 探测和连接保活，减少跨境链路重传、空闲断开和 PMTU 异常。
 - 增大 TCP/UDP 接收发送缓冲区、SYN 队列和网卡 backlog，缓解高延迟或突发流量时的队列溢出。
 - 尝试为当前默认出口网卡立即切换 fq；重启后由 sysctl 默认队列继续生效。
+- 执行结束会显示依赖工具路径、`tcp_congestion_control`、默认 qdisc、当前网卡 qdisc 和每个 sysctl 参数的读取验收结果；如果内核没有 `tcp_bbr`，会明确提示“部分成功”，不会伪报 BBR 已启用。
 
 原配置变更前会保留为 `/etc/sysctl.d/99-amki-vpn-network.conf.bak`。这些参数用于改善拥塞控制和队列稳定性，不代表可以绕过运营商的强制限速或永久避免识别；实际效果还取决于 VPS 线路、云厂商 QoS、MTU 和对端网络。
 
