@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #  Sing-Box-Plus 原生管理脚本（18 节点：直连 9 + WARP 9）
-#  Version: v4.2.2
+#  Version: v4.2.3
 #  Project: native deployment for mainland-China network conditions
 # ============================================================
 
@@ -326,7 +326,7 @@ VPNGATE_SCORE=${VPNGATE_SCORE:-}
 
 # 常量
 SCRIPT_NAME="amki-vpn"
-SCRIPT_VERSION="v4.2.2"
+SCRIPT_VERSION="v4.2.3"
 SCRIPT_UPDATE_URL=${AMKI_VPN_SCRIPT_URL:-https://raw.githubusercontent.com/chengamki-tech/amki-vpn/main/sing-box-plus.sh}
 SCRIPT_UPDATE_REF_API_URL=${AMKI_VPN_SCRIPT_REF_API_URL:-https://api.github.com/repos/chengamki-tech/amki-vpn/commits/main}
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
@@ -1394,6 +1394,19 @@ SYSCTL
   mv -f "$tmp" "$NETWORK_SYSCTL_FILE"
 }
 
+apply_network_sysctl_values(){
+  local key value failed=0
+  [[ -f "$NETWORK_SYSCTL_FILE" ]] || return 1
+  while IFS='=' read -r key value; do
+    [[ -n "$key" && "$key" != \#* ]] || continue
+    if ! sysctl -w "$key=$value" >/dev/null 2>&1; then
+      warn "无法直接应用：${key}=${value}"
+      failed=1
+    fi
+  done < "$NETWORK_SYSCTL_FILE"
+  return "$failed"
+}
+
 apply_network_qdisc(){
   local dev
   command -v tc >/dev/null 2>&1 || return 1
@@ -1410,13 +1423,21 @@ network_active_qdisc(){
 }
 
 verify_network_sysctl(){
-  local key expected actual failed=0
+  local key expected actual active dev failed=0
   [[ -f "$NETWORK_SYSCTL_FILE" ]] || return 1
+  dev="$(network_default_device)"
   while IFS='=' read -r key expected; do
     [[ -n "$key" && "$key" != \#* ]] || continue
     actual="$(sysctl_value "$key")"
     if [[ "$actual" != "$expected" ]]; then
-      warn "参数未生效：${key}=${actual:-未读取}（期望 ${expected}）"
+      if [[ "$key" == net.core.default_qdisc ]]; then
+        active="$(network_active_qdisc)"
+        if [[ "$active" == "$expected" ]]; then
+          info "默认 qdisc 当前为 ${actual:-未读取}，但 ${dev:-当前网卡} 实际 qdisc 已确认是 ${active}"
+          continue
+        fi
+      fi
+      warn "参数未完全按期望值生效（可能被宿主机限制或覆盖）：${key}=${actual:-未读取}（期望 ${expected}）"
       failed=1
     fi
   done < "$NETWORK_SYSCTL_FILE"
@@ -1462,6 +1483,7 @@ enable_bbr(){
   load_bbr_module && bbr_available=1 || true
   write_network_sysctl || { warn "写入线路优化配置失败"; return 1; }
   sysctl --system >/dev/null 2>&1 && sysctl_ok=1 || warn "sysctl 应用命令返回失败"
+  apply_network_sysctl_values || warn "部分 sysctl 无法直接应用，稍后会按实际读取值验收"
   apply_network_qdisc && qdisc_ok=1 || warn "当前网卡 qdisc 未确认切换为 fq"
   verify_network_sysctl && sysctl_ok=1 || sysctl_ok=0
   network_optimization_report
