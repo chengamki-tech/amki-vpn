@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #  Sing-Box-Plus 原生管理脚本（18 节点：直连 9 + WARP 9）
-#  Version: v4.1.6
+#  Version: v4.1.7
 #  Project: native deployment for mainland-China network conditions
 # ============================================================
 
@@ -325,7 +325,7 @@ VPNGATE_SCORE=${VPNGATE_SCORE:-}
 
 # 常量
 SCRIPT_NAME="amki-vpn"
-SCRIPT_VERSION="v4.1.6"
+SCRIPT_VERSION="v4.1.7"
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
 REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
 GRPC_SERVICE=${GRPC_SERVICE:-grpc}
@@ -1339,14 +1339,15 @@ banner(){
   hr
   echo -e "  ${C_BLUE}1)${C_RESET} 安装/部署（18 节点）"
   echo -e "  ${C_GREEN}2)${C_RESET} 查看分享链接（IPv4）"
-  echo -e "  ${C_GREEN}6)${C_RESET} 查看分享链接（IPv6）"
-  echo -e "  ${C_GREEN}3)${C_RESET} 重启服务"
-  echo -e "  ${C_GREEN}4)${C_RESET} 一键更换所有端口"
-  echo -e "  ${C_GREEN}5)${C_RESET} 一键线路优化（BBR/抗拥塞）"
+  echo -e "  ${C_GREEN}3)${C_RESET} 查看分享链接（IPv6）"
+  echo -e "  ${C_GREEN}4)${C_RESET} 重启服务"
+  echo -e "  ${C_GREEN}5)${C_RESET} 一键更换所有端口"
+  echo -e "  ${C_GREEN}6)${C_RESET} 一键线路优化（BBR/抗拥塞）"
   echo -e "  ${C_GREEN}7)${C_RESET} 配置/管理 SOCKS5 落地 IP"
   echo -e "  ${C_GREEN}8)${C_RESET} 配置/管理 VPN Gate 落地"
   echo -e "  ${C_RED}9)${C_RESET} 卸载"
-  echo -e "  ${C_RED}0)${C_RESET} 退出"
+  echo -e "  ${C_RED}10)${C_RESET} 退出"
+  echo -e "  ${C_DIM}0)${C_RESET} 退出（兼容键）"
   hr
 }
 
@@ -2173,15 +2174,14 @@ menu(){
   deploy_native
   ;;
   2) if ensure_installed_or_hint; then print_links_grouped 4; exit 0; fi ;;
-
-  6) if ensure_installed_or_hint; then print_links_grouped 6; exit 0; fi ;;
-    3) if ensure_installed_or_hint; then restart_service; fi; read -rp "回车返回..." _ || true; menu ;;
-   4) if ensure_installed_or_hint; then rotate_ports; fi; menu ;;
-    5) enable_bbr; read -rp "回车返回..." _ || true; menu ;;
+  3) if ensure_installed_or_hint; then print_links_grouped 6; exit 0; fi ;;
+  4) if ensure_installed_or_hint; then restart_service; fi; read -rp "回车返回..." _ || true; menu ;;
+  5) if ensure_installed_or_hint; then rotate_ports; fi; menu ;;
+  6) enable_bbr; read -rp "回车返回..." _ || true; menu ;;
     7) if ensure_installed_or_hint; then manage_landing_menu; fi; menu ;;
     8) if ensure_installed_or_hint; then manage_vpngate_menu; fi; menu ;;
     9) uninstall_all ;; # 直接退出
-    0) exit 0 ;;
+    10|0) exit 0 ;;
     *) menu ;;
   esac
 }

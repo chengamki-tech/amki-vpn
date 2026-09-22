@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #  Sing-Box-Plus 原生管理脚本（18 节点：直连 9 + WARP 9）
-#  Version: v4.1.5
+#  Version: v4.1.7
 #  Project: native deployment for mainland-China network conditions
 # ============================================================
 
@@ -270,6 +270,7 @@ CONF_JSON=${CONF_JSON:-$SB_DIR/config.json}
 DATA_DIR=${DATA_DIR:-$SB_DIR/data}
 CERT_DIR=${CERT_DIR:-$SB_DIR/cert}
 WGCF_DIR=${WGCF_DIR:-$SB_DIR/wgcf}
+NETWORK_SYSCTL_FILE=${NETWORK_SYSCTL_FILE:-/etc/sysctl.d/99-amki-vpn-network.conf}
 
 # 功能开关（保持稳定默认）
 ENABLE_WARP=${ENABLE_WARP:-true}
@@ -324,7 +325,7 @@ VPNGATE_SCORE=${VPNGATE_SCORE:-}
 
 # 常量
 SCRIPT_NAME="amki-vpn"
-SCRIPT_VERSION="v4.1.5"
+SCRIPT_VERSION="v4.1.7"
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
 REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
 GRPC_SERVICE=${GRPC_SERVICE:-grpc}
@@ -1198,15 +1199,110 @@ JSON
   hr
 }
 
-# ===== BBR =====
-enable_bbr(){
-  if sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q bbr; then
-    info "BBR 已启用"
+# ===== 线路优化：BBR / fq / 抗队列拥塞 =====
+sysctl_value(){
+  sysctl -n "$1" 2>/dev/null || true
+}
+
+network_default_device(){
+  ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i + 1); exit}}'
+}
+
+network_cc_available(){
+  local cc="$1"
+  grep -Eq "(^|[[:space:]])${cc}([[:space:]]|$)" /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null
+}
+
+write_network_sysctl(){
+  local tmp key value cc
+  cc="$(sysctl_value net.ipv4.tcp_congestion_control)"
+
+  if ! network_cc_available bbr; then
+    modprobe tcp_bbr 2>/dev/null || true
+  fi
+  if network_cc_available bbr; then
+    cc=bbr
+  elif [[ -z "$cc" ]]; then
+    cc=cubic
+  fi
+
+  mkdir -p "$(dirname "$NETWORK_SYSCTL_FILE")" || return 1
+  tmp="$(mktemp "${NETWORK_SYSCTL_FILE}.tmp.XXXXXX")" || return 1
+  chmod 0644 "$tmp"
+  {
+    echo "# amki-vpn ${SCRIPT_VERSION}: BBR, fq and congestion-control tuning"
+    while IFS='=' read -r key value; do
+      [[ -n "$key" ]] || continue
+      [[ "$key" == net.ipv4.tcp_congestion_control ]] && value="$cc"
+      sysctl -n "$key" >/dev/null 2>&1 || continue
+      printf '%s=%s\n' "$key" "$value"
+    done <<'SYSCTL'
+net.core.default_qdisc=fq
+net.core.somaxconn=4096
+net.core.netdev_max_backlog=250000
+net.core.rmem_max=67108864
+net.core.wmem_max=67108864
+net.ipv4.tcp_congestion_control=bbr
+net.ipv4.tcp_fastopen=3
+net.ipv4.tcp_mtu_probing=1
+net.ipv4.tcp_slow_start_after_idle=0
+net.ipv4.tcp_keepalive_time=600
+net.ipv4.tcp_keepalive_intvl=30
+net.ipv4.tcp_keepalive_probes=5
+net.ipv4.tcp_max_syn_backlog=8192
+net.ipv4.tcp_syncookies=1
+net.ipv4.tcp_fin_timeout=15
+net.ipv4.tcp_rmem=4096 87380 33554432
+net.ipv4.tcp_wmem=4096 65536 33554432
+net.ipv4.udp_rmem_min=16384
+net.ipv4.udp_wmem_min=16384
+SYSCTL
+  } > "$tmp"
+
+  if [[ -f "$NETWORK_SYSCTL_FILE" ]] && ! cmp -s "$tmp" "$NETWORK_SYSCTL_FILE" && [[ ! -e "${NETWORK_SYSCTL_FILE}.bak" ]]; then
+    cp -a "$NETWORK_SYSCTL_FILE" "${NETWORK_SYSCTL_FILE}.bak" 2>/dev/null || true
+  fi
+  mv -f "$tmp" "$NETWORK_SYSCTL_FILE"
+}
+
+apply_network_qdisc(){
+  local dev
+  command -v tc >/dev/null 2>&1 || return 0
+  dev="$(network_default_device)"
+  [[ -n "$dev" && "$dev" != lo && "$dev" =~ ^[a-zA-Z0-9_.:-]+$ ]] || return 0
+  tc qdisc replace dev "$dev" root fq >/dev/null 2>&1 || warn "当前网卡 ${dev} 无法立即切换 fq，将由 sysctl 在后续启动时生效"
+}
+
+network_optimization_state(){
+  local cc qdisc dev active
+  cc="$(sysctl_value net.ipv4.tcp_congestion_control)"
+  qdisc="$(sysctl_value net.core.default_qdisc)"
+  dev="$(network_default_device)"
+  active=""
+  if command -v tc >/dev/null 2>&1 && [[ -n "$dev" ]]; then
+    active="$(tc qdisc show dev "$dev" 2>/dev/null | awk 'NR == 1 {print $2}')"
+  fi
+  if [[ "$cc" == bbr && ( "$qdisc" == fq || "$active" == fq ) ]]; then
+    echo -e "${C_GREEN}已启用 BBR/fq 抗拥塞（${dev:-默认网卡}）${C_RESET}"
+  elif [[ -n "$cc" ]]; then
+    echo -e "${C_YELLOW}拥塞控制：${cc}，队列：${qdisc:-未知}${C_RESET}"
   else
-    echo "net.core.default_qdisc=fq" >/etc/sysctl.d/99-bbr.conf
-    echo "net.ipv4.tcp_congestion_control=bbr" >>/etc/sysctl.d/99-bbr.conf
-    sysctl --system >/dev/null 2>&1 || true
-    info "已尝试开启 BBR（如内核不支持需自行升级）"
+    echo -e "${C_RED}未检测到线路优化状态${C_RESET}"
+  fi
+}
+
+enable_bbr(){
+  [[ "$EUID" -eq 0 ]] || { warn "线路优化需要 root 权限"; return 1; }
+  write_network_sysctl || { warn "写入线路优化配置失败"; return 1; }
+  if sysctl --system >/dev/null 2>&1; then
+    apply_network_qdisc
+    ok "线路优化已应用：BBR/fq、TCP Fast Open、MTU 探测、TCP/UDP 缓冲区和连接保活"
+  else
+    warn "sysctl 应用部分失败，请检查 ${NETWORK_SYSCTL_FILE}"
+    return 1
+  fi
+  if ! network_cc_available bbr && [[ "$(sysctl_value net.ipv4.tcp_congestion_control)" != bbr ]]; then
+    warn "当前内核不提供 BBR，已保留可用拥塞控制；升级内核后再次执行本项即可启用"
   fi
 }
 
@@ -1226,7 +1322,7 @@ landing_state(){
   fi
 }
 bbr_state(){
-  sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q bbr && echo -e "${C_GREEN}已启用 BBR${C_RESET}" || echo -e "${C_RED}未启用 BBR${C_RESET}"
+  network_optimization_state
 }
 
 banner(){
@@ -1243,14 +1339,15 @@ banner(){
   hr
   echo -e "  ${C_BLUE}1)${C_RESET} 安装/部署（18 节点）"
   echo -e "  ${C_GREEN}2)${C_RESET} 查看分享链接（IPv4）"
-  echo -e "  ${C_GREEN}6)${C_RESET} 查看分享链接（IPv6）"
-  echo -e "  ${C_GREEN}3)${C_RESET} 重启服务"
-  echo -e "  ${C_GREEN}4)${C_RESET} 一键更换所有端口"
-  echo -e "  ${C_GREEN}5)${C_RESET} 一键开启 BBR"
+  echo -e "  ${C_GREEN}3)${C_RESET} 查看分享链接（IPv6）"
+  echo -e "  ${C_GREEN}4)${C_RESET} 重启服务"
+  echo -e "  ${C_GREEN}5)${C_RESET} 一键更换所有端口"
+  echo -e "  ${C_GREEN}6)${C_RESET} 一键线路优化（BBR/抗拥塞）"
   echo -e "  ${C_GREEN}7)${C_RESET} 配置/管理 SOCKS5 落地 IP"
   echo -e "  ${C_GREEN}8)${C_RESET} 配置/管理 VPN Gate 落地"
   echo -e "  ${C_RED}9)${C_RESET} 卸载"
-  echo -e "  ${C_RED}0)${C_RESET} 退出"
+  echo -e "  ${C_RED}10)${C_RESET} 退出"
+  echo -e "  ${C_DIM}0)${C_RESET} 退出（兼容键）"
   hr
 }
 
@@ -2077,15 +2174,14 @@ menu(){
   deploy_native
   ;;
   2) if ensure_installed_or_hint; then print_links_grouped 4; exit 0; fi ;;
-
-  6) if ensure_installed_or_hint; then print_links_grouped 6; exit 0; fi ;;
-    3) if ensure_installed_or_hint; then restart_service; fi; read -rp "回车返回..." _ || true; menu ;;
-   4) if ensure_installed_or_hint; then rotate_ports; fi; menu ;;
-    5) enable_bbr; read -rp "回车返回..." _ || true; menu ;;
+  3) if ensure_installed_or_hint; then print_links_grouped 6; exit 0; fi ;;
+  4) if ensure_installed_or_hint; then restart_service; fi; read -rp "回车返回..." _ || true; menu ;;
+  5) if ensure_installed_or_hint; then rotate_ports; fi; menu ;;
+  6) enable_bbr; read -rp "回车返回..." _ || true; menu ;;
     7) if ensure_installed_or_hint; then manage_landing_menu; fi; menu ;;
     8) if ensure_installed_or_hint; then manage_vpngate_menu; fi; menu ;;
     9) uninstall_all ;; # 直接退出
-    0) exit 0 ;;
+    10|0) exit 0 ;;
     *) menu ;;
   esac
 }
