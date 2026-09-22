@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #  Sing-Box-Plus 原生管理脚本（18 节点：直连 9 + WARP 9）
-#  Version: v4.1.3
+#  Version: v4.1.4
 #  Project: native deployment for mainland-China network conditions
 # ============================================================
 
@@ -297,6 +297,7 @@ LANDING_DOMAINS=()
 LANDING_EXCLUDED_DOMAINS=(
   youtube.com ytimg.com googlevideo.com
   tiktok.com tiktokcdn.com
+  twimg.com fbcdn.net cdninstagram.com redditstatic.com licdn.com discordapp.net
   twitch.tv ttvnw.net
   netflix.com nflxvideo.net nflximg.net
   disneyplus.com disney-plus.net
@@ -323,7 +324,7 @@ VPNGATE_SCORE=${VPNGATE_SCORE:-}
 
 # 常量
 SCRIPT_NAME="amki-vpn"
-SCRIPT_VERSION="v4.1.3"
+SCRIPT_VERSION="v4.1.4"
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
 REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
 GRPC_SERVICE=${GRPC_SERVICE:-grpc}
