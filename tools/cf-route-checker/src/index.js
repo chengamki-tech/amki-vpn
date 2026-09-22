@@ -175,7 +175,10 @@ function json(data, status = 200) {
       "content-type": "application/json; charset=utf-8",
       "cache-control": "no-store",
       "x-content-type-options": "nosniff",
-      "access-control-allow-origin": "same-origin"
+      "access-control-allow-origin": "*",
+      "access-control-allow-methods": "GET, OPTIONS",
+      "access-control-allow-headers": "Content-Type",
+      "cross-origin-resource-policy": "cross-origin"
     }
   });
 }
@@ -184,7 +187,7 @@ function headers() {
   return {
     "content-type": "text/html; charset=utf-8",
     "cache-control": "no-store",
-    "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'self'",
+    "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'self'",
     "referrer-policy": "no-referrer",
     "x-content-type-options": "nosniff",
     "x-frame-options": "DENY"
@@ -280,7 +283,7 @@ function clientMeta(request) {
 export default {
   async fetch(request) {
     const url = new URL(request.url);
-    if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: { "access-control-allow-origin": "same-origin", "access-control-allow-methods": "GET, OPTIONS" } });
+    if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: { "access-control-allow-origin": "*", "access-control-allow-methods": "GET, OPTIONS", "access-control-allow-headers": "Content-Type" } });
     try {
       if (url.pathname === "/") return new Response(html, { headers: headers() });
       if (url.pathname === "/api/identity" && request.method === "GET") return json({ ...clientMeta(request), version: VERSION });
