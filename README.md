@@ -56,6 +56,18 @@ bash amki-vpn.sh
 
 云厂商安全组还必须放行配置中对应的 TCP/UDP 端口。系统防火墙自动放行不等于云安全组已经放行。
 
+## 路由检测网站
+
+已部署 Cloudflare Worker 检测页：<https://amki-vpn-route-checker.chengamki.workers.dev>。
+
+使用方式：
+
+1. 在客户端当前代理模式下打开检测页，点击“测当前出口 IP”，记录 Cloudflare 看到的来源 IP。
+2. 输入域名检测 DNS、Cloudflare 边缘 HTTP 状态和项目预期路由。
+3. 分别切换 SOCKS5、WARP、VPS 节点再测出口 IP；IP 随规则变化，才能确认检测页本身确实经过了对应出口。
+
+检测页会把“Cloudflare Worker 访问目标站”和“浏览器访问检测页的出口 IP”分开显示。Worker 无法直接读取 VPS 上 sing-box 到目标站的连接 IP，因此不能把 Worker 的 HTTP 结果误认为 SOCKS5 实际出口。
+
 ## SOCKS5 落地
 
 数据路径：

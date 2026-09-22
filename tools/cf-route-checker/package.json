@@ -1,0 +1,14 @@
+{
+  "name": "amki-vpn-route-checker",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Cloudflare Worker for checking DNS, edge reachability, and the IP seen by the checker.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "dry-run": "wrangler deploy --dry-run"
+  },
+  "devDependencies": {
+    "wrangler": "^4.136.1"
+  }
+}
