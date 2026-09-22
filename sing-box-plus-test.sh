@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #  Sing-Box-Plus 原生管理脚本（18 节点：直连 9 + WARP 9）
-#  Version: v4.2.3
+#  Version: v4.3.0
 #  Project: native deployment for mainland-China network conditions
 # ============================================================
 
@@ -326,7 +326,7 @@ VPNGATE_SCORE=${VPNGATE_SCORE:-}
 
 # 常量
 SCRIPT_NAME="amki-vpn"
-SCRIPT_VERSION="v4.2.3"
+SCRIPT_VERSION="v4.3.0"
 SCRIPT_UPDATE_URL=${AMKI_VPN_SCRIPT_URL:-https://raw.githubusercontent.com/chengamki-tech/amki-vpn/main/sing-box-plus.sh}
 SCRIPT_UPDATE_REF_API_URL=${AMKI_VPN_SCRIPT_REF_API_URL:-https://api.github.com/repos/chengamki-tech/amki-vpn/commits/main}
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
@@ -358,6 +358,19 @@ install_amkivpn_command(){
   [[ -n "$script_path" && -f "$script_path" ]] || return 0
   ln -sfn "$script_path" /usr/local/bin/amkivpn
   chmod 0755 "$script_path" /usr/local/bin/amkivpn 2>/dev/null || true
+}
+
+acquire_management_lock(){
+  command -v flock >/dev/null 2>&1 || return 0
+  local fd
+  if ! exec {fd}>/run/lock/amki-vpn.lock 2>/dev/null; then
+    warn "无法创建管理锁，继续运行但请避免同时打开多个面板"
+    return 0
+  fi
+  if ! flock -n "$fd"; then
+    warn "已有另一个 amkivpn 管理进程正在运行，请先关闭它再重试"
+    return 1
+  fi
 }
 
 script_update_path(){
@@ -492,20 +505,52 @@ safe_source_env(){ # 安全 source，忽略不存在文件
   set -u
 }
 
-get_ip4(){ # 多源获取公网 IPv4
-  local ip
-  ip=$(curl -4 -fsSL ipv4.icanhazip.com 2>/dev/null || true)
-  [[ -z "$ip" ]] && ip=$(curl -4 -fsSL ifconfig.me 2>/dev/null || true)
-  [[ -z "$ip" ]] && ip=$(curl -4 -fsSL ip.sb 2>/dev/null || true)
-  echo "${ip:-127.0.0.1}"
+is_ipv4(){
+  local value="$1" part
+  [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  local IFS=.
+  read -ra parts <<< "$value"
+  for part in "${parts[@]}"; do
+    ((part >= 0 && part <= 255)) || return 1
+  done
+}
+
+is_ipv6(){
+  local value="$1" group
+  [[ "$value" == *:* && "$value" != *[!0-9a-fA-F:]* ]] || return 1
+  [[ "$value" != *::*::* ]] || return 1
+  local IFS=:
+  read -ra groups <<< "$value"
+  ((${#groups[@]} <= 8)) || return 1
+  for group in "${groups[@]}"; do
+    [[ -z "$group" || "$group" =~ ^[0-9a-fA-F]{1,4}$ ]] || return 1
+  done
+}
+
+get_ip4(){ # 多源获取公网 IPv4；获取失败时返回空，不伪造 127.0.0.1
+  local ip url
+  for url in ipv4.icanhazip.com ifconfig.me/ip ip.sb; do
+    ip="$(env -u ALL_PROXY -u HTTP_PROXY -u HTTPS_PROXY -u all_proxy -u http_proxy -u https_proxy \
+      curl -4 -fsSL --connect-timeout 4 --max-time 8 "https://${url}" 2>/dev/null | tr -d '[:space:]' || true)"
+    if is_ipv4 "$ip"; then
+      printf '%s\n' "$ip"
+      return 0
+    fi
+  done
+  return 0
 }
 
 get_ip6(){ # 多源获取公网 IPv6（无 IPv6 则返回空）
-  local ip
-  ip=$(curl -6 -fsSL ipv6.icanhazip.com 2>/dev/null || true)
-  [[ -z "$ip" ]] && ip=$(curl -6 -fsSL ifconfig.me 2>/dev/null || true)
-  [[ -z "$ip" ]] && ip=$(curl -6 -fsSL ip.sb 2>/dev/null || true)
-  echo "${ip:-}"
+  local ip url
+  for url in ipv6.icanhazip.com ifconfig.me/ip ip.sb; do
+    ip="$(env -u ALL_PROXY -u HTTP_PROXY -u HTTPS_PROXY -u all_proxy -u http_proxy -u https_proxy \
+      curl -6 -fsSL --connect-timeout 4 --max-time 8 "https://${url}" 2>/dev/null | tr -d '[:space:]' || true)"
+    if is_ipv6 "$ip"; then
+      printf '%s\n' "$ip"
+      return 0
+    fi
+  done
+  return 0
 }
 
 # 兼容旧调用：默认返回 IPv4
@@ -537,7 +582,8 @@ PORT_HY2_OBFS=""; PORT_SS2022=""; PORT_SS=""; PORT_TUIC=""
 PORT_VLESSR_W=""; PORT_VLESS_GRPCR_W=""; PORT_TROJANR_W=""; PORT_HY2_W=""; PORT_VMESS_WS_W=""
 PORT_HY2_OBFS_W=""; PORT_SS2022_W=""; PORT_SS_W=""; PORT_TUIC_W=""
 
-save_ports(){ cat > "$SB_DIR/ports.env" <<EOF
+save_ports(){
+  ( umask 077; cat > "$SB_DIR/ports.env" <<EOF
 PORT_VLESSR=$PORT_VLESSR
 PORT_VLESS_GRPCR=$PORT_VLESS_GRPCR
 PORT_TROJANR=$PORT_TROJANR
@@ -557,6 +603,8 @@ PORT_SS2022_W=$PORT_SS2022_W
 PORT_SS_W=$PORT_SS_W
 PORT_TUIC_W=$PORT_TUIC_W
 EOF
+  )
+  chmod 600 "$SB_DIR/ports.env" 2>/dev/null || true
 }
 load_ports(){ safe_source_env "$SB_DIR/ports.env" || return 1; }
 
@@ -588,7 +636,8 @@ save_all_ports(){
 }
 
 # ===== env / creds / warp =====
-save_env(){ cat > "$SB_DIR/env.conf" <<EOF
+save_env(){
+  ( umask 077; cat > "$SB_DIR/env.conf" <<EOF
 BIN_PATH=$BIN_PATH
 ENABLE_VLESS_REALITY=$ENABLE_VLESS_REALITY
 ENABLE_VLESS_GRPCR=$ENABLE_VLESS_GRPCR
@@ -605,10 +654,13 @@ REALITY_SERVER_PORT=$REALITY_SERVER_PORT
 GRPC_SERVICE=$GRPC_SERVICE
 VMESS_WS_PATH=$VMESS_WS_PATH
 EOF
+  )
+  chmod 600 "$SB_DIR/env.conf" 2>/dev/null || true
 }
 load_env(){ safe_source_env "$SB_DIR/env.conf" || true; }
 
-save_creds(){ cat > "$SB_DIR/creds.env" <<EOF
+save_creds(){
+  ( umask 077; cat > "$SB_DIR/creds.env" <<EOF
 UUID=$UUID
 HY2_PWD=$HY2_PWD
 REALITY_PRIV=$REALITY_PRIV
@@ -621,10 +673,13 @@ SS_PWD=$SS_PWD
 TUIC_UUID=$TUIC_UUID
 TUIC_PWD=$TUIC_PWD
 EOF
+  )
+  chmod 600 "$SB_DIR/creds.env" 2>/dev/null || true
 }
 load_creds(){ safe_source_env "$SB_DIR/creds.env" || return 1; }
 
-save_warp(){ cat > "$SB_DIR/warp.env" <<EOF
+save_warp(){
+  ( umask 077; cat > "$SB_DIR/warp.env" <<EOF
 WARP_PRIVATE_KEY=$WARP_PRIVATE_KEY
 WARP_PEER_PUBLIC_KEY=$WARP_PEER_PUBLIC_KEY
 WARP_ENDPOINT_HOST=$WARP_ENDPOINT_HOST
@@ -635,6 +690,8 @@ WARP_RESERVED_1=$WARP_RESERVED_1
 WARP_RESERVED_2=$WARP_RESERVED_2
 WARP_RESERVED_3=$WARP_RESERVED_3
 EOF
+  )
+  chmod 600 "$SB_DIR/warp.env" 2>/dev/null || true
 }
 load_warp(){ safe_source_env "$SB_DIR/warp.env" || return 1; }
 
@@ -1023,9 +1080,16 @@ Requires=network-online.target
 [Service]
 Type=simple
 Environment=ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
+ExecStartPre=${BIN_PATH} check -c ${CONF_JSON}
 ExecStart=${BIN_PATH} run -c ${CONF_JSON} -D ${DATA_DIR}
 Restart=on-failure
 RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=${DATA_DIR}
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 LimitNOFILE=1048576
@@ -1150,6 +1214,9 @@ write_config(){
     return 1
   fi
   chmod 600 "$conf_tmp"
+  if [[ -f "$CONF_JSON" ]] && ! cmp -s "$conf_tmp" "$CONF_JSON"; then
+    cp -a "$CONF_JSON" "${CONF_JSON}.bak" 2>/dev/null || warn "无法创建旧配置备份：${CONF_JSON}.bak"
+  fi
   mv -f "$conf_tmp" "$CONF_JSON"
   save_env
 }
@@ -1215,6 +1282,11 @@ print_links_grouped(){
     fi
   else
     ip="$(get_ip4)"
+  fi
+  if [[ "$mode" == "6" ]]; then
+    is_ipv6 "$ip" || { warn "未检测到可用公网 IPv6，无法生成 IPv6 分享链接"; return 1; }
+  else
+    is_ipv4 "$ip" || { warn "未检测到可用公网 IPv4，暂不生成无效分享链接"; return 1; }
   fi
   host="$(fmt_host_for_uri "$ip")"
   local links_direct=() links_warp=()
@@ -1407,6 +1479,14 @@ apply_network_sysctl_values(){
   return "$failed"
 }
 
+network_sysctl_is_core(){
+  case "$1" in
+    net.ipv4.tcp_congestion_control|net.ipv4.tcp_fastopen|net.ipv4.tcp_mtu_probing|net.ipv4.tcp_slow_start_after_idle|net.ipv4.tcp_syncookies)
+      return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 apply_network_qdisc(){
   local dev
   command -v tc >/dev/null 2>&1 || return 1
@@ -1437,8 +1517,12 @@ verify_network_sysctl(){
           continue
         fi
       fi
-      warn "参数未完全按期望值生效（可能被宿主机限制或覆盖）：${key}=${actual:-未读取}（期望 ${expected}）"
-      failed=1
+      if network_sysctl_is_core "$key"; then
+        warn "核心参数未完全按期望值生效（可能被宿主机限制或覆盖）：${key}=${actual:-未读取}（期望 ${expected}）"
+        failed=1
+      else
+        warn "附加参数受宿主机限制或被覆盖：${key}=${actual:-未读取}（期望 ${expected}）；不影响 BBR/fq 核心验收"
+      fi
     fi
   done < "$NETWORK_SYSCTL_FILE"
   return "$failed"
@@ -1493,9 +1577,10 @@ enable_bbr(){
     warn "当前内核未提供可用 BBR；其他可用参数已尝试应用，但不能宣称 BBR 生效"
   fi
   if ((sysctl_ok == 1 && qdisc_ok == 1 && bbr_available == 1)); then
-    ok "线路优化验收通过：BBR、fq 和 sysctl 参数均已读取确认"
+    ok "线路优化核心验收通过：BBR、fq 和核心 sysctl 参数均已读取确认"
+    info "附加缓冲区/队列参数若受宿主机上限限制，不影响当前 BBR/fq 生效"
   else
-    warn "线路优化为部分成功，请根据上面的验收结果处理缺失项"
+    warn "线路优化核心部分成功，请根据上面的验收结果处理缺失项"
   fi
 }
 
@@ -1756,7 +1841,11 @@ manage_diagnostic_menu(){
 
 # ===== 显示状态与 banner =====
 sb_service_state(){
-  systemctl is-active --quiet "${SYSTEMD_SERVICE:-sing-box.service}" && echo -e "${C_GREEN}运行中${C_RESET}" || echo -e "${C_RED}未运行/未安装${C_RESET}"
+  if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet "${SYSTEMD_SERVICE:-sing-box.service}"; then
+    echo -e "${C_GREEN}运行中${C_RESET}"
+  else
+    echo -e "${C_RED}未运行/未安装${C_RESET}"
+  fi
 }
 landing_state(){
   load_landing || true
@@ -1809,6 +1898,15 @@ restart_service(){
 
 rotate_ports(){
   ensure_installed_or_hint || return 0
+  local old_ports_tmp old_conf_tmp
+  old_ports_tmp="$(mktemp)" || { warn "无法创建端口回滚临时文件"; return 0; }
+  old_conf_tmp="$(mktemp)" || { rm -f "$old_ports_tmp"; warn "无法创建配置回滚临时文件"; return 0; }
+  if [[ -f "$SB_DIR/ports.env" ]]; then
+    cp -a "$SB_DIR/ports.env" "$old_ports_tmp" || { rm -f "$old_ports_tmp" "$old_conf_tmp"; warn "无法备份旧端口配置"; return 0; }
+  else : > "$old_ports_tmp"; fi
+  if [[ -f "$CONF_JSON" ]]; then
+    cp -a "$CONF_JSON" "$old_conf_tmp" || { rm -f "$old_ports_tmp" "$old_conf_tmp"; warn "无法备份旧主配置"; return 0; }
+  else : > "$old_conf_tmp"; fi
   load_ports || true
   rand_ports_reset
 
@@ -1818,10 +1916,20 @@ rotate_ports(){
   PORT_VLESSR_W=""; PORT_VLESS_GRPCR_W=""; PORT_TROJANR_W=""; PORT_HY2_W=""; PORT_VMESS_WS_W=""
   PORT_HY2_OBFS_W=""; PORT_SS2022_W=""; PORT_SS_W=""; PORT_TUIC_W=""
 
-  save_all_ports          # 重新生成并保存 18 个不重复端口
-  write_config            # 用新端口重写 /opt/sing-box/config.json
-  open_firewall           # ★ 新增：把“当前配置中的端口”全部放行
-  systemctl restart "${SYSTEMD_SERVICE}"
+  if ! save_all_ports || ! write_config || \
+     ! ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true "$BIN_PATH" check -c "$CONF_JSON" || \
+     ! systemctl restart "${SYSTEMD_SERVICE}"; then
+    warn "新端口配置未能通过校验或服务未能重启，正在恢复旧端口和配置"
+    if [[ -s "$old_ports_tmp" ]]; then cp -a "$old_ports_tmp" "$SB_DIR/ports.env"; else rm -f "$SB_DIR/ports.env"; fi
+    if [[ -s "$old_conf_tmp" ]]; then cp -a "$old_conf_tmp" "$CONF_JSON"; else rm -f "$CONF_JSON"; fi
+    load_ports || true
+    systemctl restart "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
+    rm -f "$old_ports_tmp" "$old_conf_tmp"
+    read -rp "回车返回..." _ || true
+    return 1
+  fi
+  open_firewall           # 把当前配置中的端口放行
+  rm -f "$old_ports_tmp" "$old_conf_tmp"
 
   info "已更换端口并重启。"
   read -p "回车返回..." _ || true
@@ -1860,9 +1968,8 @@ deploy_native(){
   open_firewall
   systemctl is-active --quiet "${SYSTEMD_SERVICE}" || die "sing-box 未处于运行状态"
   echo; echo -e "${C_BOLD}${C_GREEN}★ 部署完成（18 节点）${C_RESET}"; echo
-  # 打印链接并直接退出
-  print_links_grouped 4
-  exit 0
+  print_links_grouped 4 || warn "服务已启动，但公网 IPv4 未能获取；可稍后选择 2) 重试输出分享链接"
+  read -rp "回车返回管理面板..." _ || true
 }
 
 ensure_installed_or_hint(){
@@ -1899,8 +2006,19 @@ socks5_probe(){
 }
 
 validate_landing_input(){
-  local host="$1" port="$2" scope="$3"
+  local host="$1" port="$2" scope="$3" label clean_host
+  clean_host="${host#[}"
+  clean_host="${clean_host%]}"
   [[ -n "$host" ]] || { warn "落地地址不能为空"; return 1; }
+  if ! is_ipv4 "$clean_host" && ! is_ipv6 "$clean_host" && [[ ! "$clean_host" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ || "$clean_host" == *..* ]]; then
+    warn "落地地址不是有效的 IPv4、IPv6 或域名"
+    return 1
+  fi
+  local IFS=.
+  read -ra host_labels <<< "$clean_host"
+  for label in "${host_labels[@]}"; do
+    [[ ${#label} -le 63 ]] || { warn "落地域名标签过长"; return 1; }
+  done
   [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 )) || {
     warn "落地端口必须是 1-65535"; return 1;
   }
@@ -2089,6 +2207,8 @@ configure_landing(){
 
   read -rp "落地服务器 IP/域名 (当前 ${LANDING_HOST:-未设置}): " phost || return 0
   phost="${phost:-$LANDING_HOST}"
+  phost="${phost#[}"
+  phost="${phost%]}"
   [[ -n "$phost" ]] || { warn "落地地址不能为空"; return 0; }
 
   read -rp "落地端口 (当前 ${LANDING_PORT:-未设置}): " pport || return 0
@@ -2140,10 +2260,23 @@ configure_landing(){
 
 disable_landing(){
   ensure_installed_or_hint || return 0
+  local old_enable="$ENABLE_LANDING" old_config
+  old_config="$(mktemp)" || { warn "无法创建落地配置回滚文件"; return 0; }
+  cp -a "$CONF_JSON" "$old_config" || { rm -f "$old_config"; warn "无法备份当前配置"; return 0; }
   ENABLE_LANDING=false
   save_landing
-  write_config
-  systemctl restart "${SYSTEMD_SERVICE}" || { warn "sing-box 重启失败"; return 0; }
+  if ! write_config || ! ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true "$BIN_PATH" check -c "$CONF_JSON" || \
+     ! systemctl restart "${SYSTEMD_SERVICE}"; then
+    warn "关闭落地后配置校验或重启失败，正在恢复原配置"
+    ENABLE_LANDING="$old_enable"
+    save_landing || true
+    cp -a "$old_config" "$CONF_JSON"
+    systemctl restart "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
+    rm -f "$old_config"
+    read -rp "回车返回..." _ || true
+    return 1
+  fi
+  rm -f "$old_config"
   ok "已关闭落地出口，恢复直连/WARP 路由"
   read -rp "回车返回..." _ || true
 }
@@ -2615,31 +2748,93 @@ manage_vpngate_menu(){
 }
 
 # ===== 菜单 =====
-menu(){
-  banner
-  read -rp "选择: " op || true
-  case "${op:-}" in
-  1)
-  sbp_bootstrap                                     # 依赖/二进制回退
-  deploy_native
-  ;;
-  2) if ensure_installed_or_hint; then print_links_grouped 4; exit 0; fi ;;
-  3) if ensure_installed_or_hint; then print_links_grouped 6; exit 0; fi ;;
-  4) if ensure_installed_or_hint; then restart_service; fi; read -rp "回车返回..." _ || true; menu ;;
-  5) if ensure_installed_or_hint; then rotate_ports; fi; menu ;;
-  6) enable_bbr; read -rp "回车返回..." _ || true; menu ;;
-    7) if ensure_installed_or_hint; then manage_landing_menu; fi; menu ;;
-    8) if ensure_installed_or_hint; then manage_vpngate_menu; fi; menu ;;
-    9) uninstall_all ;; # 直接退出
-    10|0) exit 0 ;;
-    11) manage_diagnostic_menu; menu ;;
-    12) update_management_script; menu ;;
-    *) menu ;;
+cli_help(){
+  cat <<'HELP'
+用法：amkivpn [命令]
+
+不带命令：打开交互管理面板
+  status       显示服务、落地和线路状态
+  check        校验当前 sing-box 配置
+  update       检查并更新管理脚本（仍需输入 UPDATE）
+  version      显示脚本版本
+  help         显示本帮助
+HELP
+}
+
+run_cli_command(){
+  case "${1:-}" in
+    "") menu ;;
+    --version|-v|version)
+      echo "${SCRIPT_NAME} ${SCRIPT_VERSION}"
+      ;;
+    status)
+      banner
+      ;;
+    check|validate)
+      ensure_installed_or_hint || return 1
+      ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true "$BIN_PATH" check -c "$CONF_JSON"
+      ;;
+    update)
+      update_management_script
+      ;;
+    help|--help|-h)
+      cli_help
+      ;;
+    *)
+      warn "未知命令：$1"
+      cli_help
+      return 1
+      ;;
   esac
+}
+
+menu(){
+  local op
+  while :; do
+    banner
+    read -rp "选择: " op || return 0
+    case "${op:-}" in
+      1)
+        sbp_bootstrap
+        deploy_native
+        ;;
+      2)
+        if ensure_installed_or_hint; then print_links_grouped 4 || true; fi
+        read -rp "回车返回..." _ || true
+        ;;
+      3)
+        if ensure_installed_or_hint; then print_links_grouped 6 || true; fi
+        read -rp "回车返回..." _ || true
+        ;;
+      4)
+        if ensure_installed_or_hint; then restart_service; fi
+        read -rp "回车返回..." _ || true
+        ;;
+      5)
+        if ensure_installed_or_hint; then rotate_ports; fi
+        ;;
+      6)
+        enable_bbr || true
+        read -rp "回车返回..." _ || true
+        ;;
+      7)
+        if ensure_installed_or_hint; then manage_landing_menu; fi
+        ;;
+      8)
+        if ensure_installed_or_hint; then manage_vpngate_menu; fi
+        ;;
+      9) uninstall_all ;;
+      10|0) return 0 ;;
+      11) manage_diagnostic_menu ;;
+      12) update_management_script || true ;;
+      *) warn "无效选择：${op}"; sleep 1 ;;
+    esac
+  done
 }
 
 # ===== 入口 =====
 if [[ "${BASH_SOURCE[0]:-}" == "$0" ]]; then
   install_amkivpn_command || true
-  menu
+  acquire_management_lock || exit 1
+  run_cli_command "${1:-}"
 fi
