@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #  Sing-Box-Plus 原生管理脚本（18 节点：直连 9 + WARP 9）
-#  Version: v4.1.0
+#  Version: v4.1.1
 #  Project: native deployment for mainland-China network conditions
 # ============================================================
 
@@ -311,7 +311,7 @@ VPNGATE_SCORE=${VPNGATE_SCORE:-}
 
 # 常量
 SCRIPT_NAME="amki-vpn"
-SCRIPT_VERSION="v4.1.0"
+SCRIPT_VERSION="v4.1.1"
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
 REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
 GRPC_SERVICE=${GRPC_SERVICE:-grpc}
@@ -966,8 +966,9 @@ write_config(){
   def inbound_ss($port): {type:"shadowsocks", listen:"::", listen_port:$port, method:"aes-256-gcm", password:$SSPWD};
   def inbound_tuic($port): {type:"tuic", listen:"::", listen_port:$port, users:[{uuid:$TUICUUID, password:$TUICPWD}], congestion_control:"bbr", tls:{enabled:true, certificate_path:$CRT, key_path:$KEY, alpn:["h3"]}};
 
-  def warp_active: ($ENABLE_WARP=="true") and (($WSHOST|length)>0) and ($WSPORT>0);
-  def landing_active: ($ENABLE_LANDING=="true") and (($LHOST|length)>0) and ($LPORT>0);
+  def warp_active: (($ENABLE_WARP // "false")=="true") and (($WSHOST // "")|length)>0 and (($WSPORT // 0)>0);
+  def landing_active: (($ENABLE_LANDING // "false")=="true") and (($LHOST // "")|length)>0 and (($LPORT // 0)>0);
+  def landing_domains: ($LDOMAINS // []);
   def warp_outbound:
     {type:"socks", tag:"warp", server:$WSHOST, server_port:$WSPORT};
   def landing_outbound:
@@ -1019,19 +1020,19 @@ write_config(){
       auto_detect_interface:true,
       default_domain_resolver:"dns-cloudflare",
       rules: (
-        (if landing_active and ($LDOMAINS|length)>0 then
-          [{domain_suffix:$LDOMAINS, outbound:"landing"}]
-        else [] end)
-        + (if landing_active and ($LSCOPE=="direct" or $LSCOPE=="all") then
+        ((if landing_active and (landing_domains|length)>0 then
+          [{domain_suffix:landing_domains, outbound:"landing"}]
+        else [] end) // [])
+        + ((if landing_active and (($LSCOPE // "") == "direct" or ($LSCOPE // "") == "all") then
           [{inbound:direct_tags, outbound:"landing"}]
-        else [] end)
-        + (if landing_active and ($LSCOPE=="warp" or $LSCOPE=="all") then
+        else [] end) // [])
+        + ((if landing_active and (($LSCOPE // "") == "warp" or ($LSCOPE // "") == "all") then
             [{inbound:warp_tags, outbound:"landing"}]
           elif warp_active then
             [{inbound:warp_tags, outbound:"warp"}]
-          else [] end)
+          else [] end) // [])
       ),
-      final: (if landing_active and $LSCOPE=="all" then "landing" else "direct" end)
+      final: (if landing_active and (($LSCOPE // "") == "all") then "landing" else "direct" end)
     }
   }' > "$conf_tmp"; then
     rm -f "$conf_tmp"
