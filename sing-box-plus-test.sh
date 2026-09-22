@@ -325,7 +325,7 @@ VPNGATE_SCORE=${VPNGATE_SCORE:-}
 
 # 常量
 SCRIPT_NAME="amki-vpn"
-SCRIPT_VERSION="v4.1.8"
+SCRIPT_VERSION="v4.2.0"
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
 REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
 GRPC_SERVICE=${GRPC_SERVICE:-grpc}
@@ -1401,6 +1401,261 @@ enable_bbr(){
   fi
 }
 
+# ===== VPS 体检：依赖、系统、测速、路由和解锁 =====
+DIAG_NETQUALITY_URL=${DIAG_NETQUALITY_URL:-https://Net.Check.Place}
+
+diagnostic_curl(){
+  # Diagnostic traffic must represent the VPS egress, not an inherited shell proxy.
+  env -u ALL_PROXY -u HTTP_PROXY -u HTTPS_PROXY -u all_proxy -u http_proxy -u https_proxy \
+    curl "$@"
+}
+
+diagnostic_prereq_report(){
+  local cmd
+  for cmd in curl ip ping openssl timeout mtr traceroute dig; do
+    if command -v "$cmd" >/dev/null 2>&1; then
+      printf '  %-10s %s\n' "$cmd" "已安装：$(command -v "$cmd")"
+    else
+      printf '  %-10s %s\n' "$cmd" "缺失（对应检测会跳过）"
+    fi
+  done
+}
+
+diagnostic_base_ok(){
+  local cmd
+  for cmd in curl ip ping openssl timeout; do
+    command -v "$cmd" >/dev/null 2>&1 || return 1
+  done
+}
+
+ensure_diagnostic_prereqs(){
+  [[ "$EUID" -eq 0 ]] || { warn "VPS 体检需要 root 权限才能补齐检测工具"; return 1; }
+  if diagnostic_base_ok && command -v mtr >/dev/null 2>&1 && command -v traceroute >/dev/null 2>&1 && command -v dig >/dev/null 2>&1; then
+    info "VPS 体检依赖已就绪"
+    diagnostic_prereq_report
+    return 0
+  fi
+
+  sbp_detect_pm || { warn "找不到包管理器，无法自动安装 VPS 体检依赖"; diagnostic_prereq_report; return 1; }
+  local -a packages=()
+  case "$PM" in
+    apt) packages=(curl iproute2 iputils-ping openssl coreutils mtr-tiny traceroute dnsutils) ;;
+    dnf|yum) packages=(curl iproute iputils openssl coreutils mtr traceroute bind-utils) ;;
+    pacman) packages=(curl iproute2 iputils openssl coreutils mtr traceroute bind) ;;
+    zypper) packages=(curl iproute2 iputils openssl coreutils mtr traceroute bind-utils) ;;
+    *) warn "暂不支持通过 ${PM} 自动安装 VPS 体检依赖"; diagnostic_prereq_report; return 1 ;;
+  esac
+  warn "VPS 体检缺少工具，正在安装：${packages[*]}"
+  sbp_pm_refresh || true
+  sbp_pm_install "${packages[@]}"
+  diagnostic_prereq_report
+  diagnostic_base_ok || { warn "基础体检依赖仍不完整，无法继续"; return 1; }
+}
+
+diagnostic_system_report(){
+  local os_name kernel arch virt v4 v6 iface mtu
+  os_name="$(awk -F= '/^PRETTY_NAME=/{gsub(/^\"|\"$/, "", $2); print $2}' /etc/os-release 2>/dev/null || true)"
+  kernel="$(uname -r 2>/dev/null || true)"
+  arch="$(uname -m 2>/dev/null || true)"
+  virt="$(systemd-detect-virt 2>/dev/null || echo unknown)"
+  iface="$(network_default_device)"
+  mtu="$(ip link show dev "$iface" 2>/dev/null | awk '/mtu/{for (i=1;i<=NF;i++) if ($i=="mtu") {print $(i+1); exit}}')"
+  v4="$(diagnostic_curl -4 -fsS --max-time 8 https://api.ipify.org 2>/dev/null || true)"
+  v6="$(diagnostic_curl -6 -fsS --max-time 8 https://api64.ipify.org 2>/dev/null || true)"
+
+  hr
+  echo "系统与出口概览："
+  echo "  系统：${os_name:-未读取}"
+  echo "  内核/架构：${kernel:-未读取} / ${arch:-未读取}"
+  echo "  虚拟化：${virt:-未读取}"
+  echo "  CPU：$(nproc 2>/dev/null || echo 未读取) 核"
+  echo "  内存：$(free -h 2>/dev/null | awk '/^Mem:/{print $3" / "$2}' || echo 未读取)"
+  echo "  磁盘：$(df -h / 2>/dev/null | awk 'NR==2{print $3" / "$2"（"$5"）"}' || echo 未读取)"
+  echo "  出口网卡/MTU：${iface:-未检测到} / ${mtu:-未读取}"
+  echo "  公网 IPv4：${v4:-获取失败}"
+  echo "  公网 IPv6：${v6:-不可用或获取失败}"
+  echo "  DNS 配置："
+  awk '/^[[:space:]]*nameserver[[:space:]]/{print "    "$0}' /etc/resolv.conf 2>/dev/null || echo "    未读取"
+  if [[ -f "$NETWORK_SYSCTL_FILE" ]]; then
+    network_optimization_report
+  else
+    echo "  线路优化：尚未写入 ${NETWORK_SYSCTL_FILE}（可执行菜单 6）"
+  fi
+}
+
+diagnostic_service_report(){
+  hr
+  echo "amki-vpn 服务检查："
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl is-active --quiet "$SYSTEMD_SERVICE"; then echo "  sing-box：运行中"; else echo "  sing-box：未运行"; fi
+    if systemctl is-active --quiet "$VPNGATE_SERVICE"; then echo "  VPN Gate OpenVPN：运行中"; else echo "  VPN Gate OpenVPN：未运行"; fi
+  fi
+  if [[ -x "$BIN_PATH" && -f "$CONF_JSON" ]]; then
+    if ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true "$BIN_PATH" check -c "$CONF_JSON" >/dev/null 2>&1; then
+      echo "  配置校验：通过"
+    else
+      echo "  配置校验：失败"
+    fi
+  else
+    echo "  配置校验：未安装或配置不存在"
+  fi
+  if command -v ss >/dev/null 2>&1; then
+    echo "  监听端口："
+    ss -lntup 2>/dev/null | awk '/sing-box|11080/{print "    "$0}' || true
+  fi
+}
+
+diagnostic_speed_download(){
+  local label="$1" url="$2" result code seconds bytes mbps
+  result="$(diagnostic_curl -L --connect-timeout 8 --max-time 35 --silent --show-error \
+    -o /dev/null -w '%{http_code} %{time_total} %{size_download}' "$url" 2>/dev/null || true)"
+  read -r code seconds bytes <<< "$result"
+  if [[ "$code" =~ ^2|^3 ]] && [[ "$seconds" =~ ^[0-9] ]]; then
+    mbps="$(awk -v b="${bytes:-0}" -v t="$seconds" 'BEGIN {if (t > 0) printf "%.2f", b*8/t/1000000; else print "0.00"}')"
+    printf '  %-12s HTTP %s，%.2fs，约 %s Mbps\n' "$label" "$code" "$seconds" "$mbps"
+  else
+    printf '  %-12s 失败（HTTP %s，可能被拦截或超时）\n' "$label" "${code:-000}"
+  fi
+}
+
+diagnostic_speed_upload(){
+  local result code seconds mbps
+  result="$(dd if=/dev/zero bs=1M count=2 2>/dev/null | diagnostic_curl -X POST \
+    --connect-timeout 8 --max-time 35 --silent --show-error --data-binary @- \
+    -o /dev/null -w '%{http_code} %{time_total}' https://speed.cloudflare.com/__up 2>/dev/null || true)"
+  read -r code seconds <<< "$result"
+  if [[ "$code" =~ ^2|^3 ]] && [[ "$seconds" =~ ^[0-9] ]]; then
+    mbps="$(awk -v t="$seconds" 'BEGIN {if (t > 0) printf "%.2f", 16/t; else print "0.00"}')"
+    printf '  %-12s HTTP %s，%.2fs，约 %s Mbps\n' "Cloudflare上传" "$code" "$seconds" "$mbps"
+  else
+    printf '  %-12s 失败（HTTP %s，目标可能不支持上传测试）\n' "Cloudflare上传" "${code:-000}"
+  fi
+}
+
+diagnostic_speed(){
+  hr
+  echo "轻量网络测速（每个下载目标约 5 MiB，结果受目标站和跨境拥塞影响）："
+  diagnostic_speed_download "Cloudflare" "https://speed.cloudflare.com/__down?bytes=5242880"
+  diagnostic_speed_download "OVH" "https://proof.ovh.net/files/5Mb.dat"
+  diagnostic_speed_upload
+  echo "  说明：这是 HTTP 实测，不等同于云厂商承诺带宽；需要国内三网测速请运行 NetQuality。"
+}
+
+diagnostic_route(){
+  local label target
+  hr
+  echo "VPS 出站路由与丢包检测："
+  echo "  注意：这里测的是 VPS -> 目标的出站路径，不是客户端 -> VPS 的回程。"
+  for label in "Cloudflare|1.1.1.1" "DNSPod|223.5.5.5" "114DNS|114.114.114.114"; do
+    target="${label#*|}"; label="${label%%|*}"
+    echo
+    echo "[$label $target]"
+    if command -v mtr >/dev/null 2>&1; then
+      timeout 50 mtr -4 -n -r -w -c 5 "$target" 2>&1 || warn "${label} mtr 检测失败"
+    elif command -v traceroute >/dev/null 2>&1; then
+      timeout 50 traceroute -4 -n -m 15 -w 2 "$target" 2>&1 || warn "${label} traceroute 检测失败"
+    else
+      warn "缺少 mtr/traceroute，已跳过"
+    fi
+  done
+  echo
+  echo "需要三网回程（电信/联通/移动）请使用菜单中的 NetQuality。"
+}
+
+diagnostic_http_status_label(){
+  case "$1" in
+    2*|3*) echo "可访问" ;;
+    401) echo "服务可达（需要认证）" ;;
+    403|451) echo "被拒/可能区域限制" ;;
+    5*) echo "上游错误" ;;
+    000|*) echo "超时、DNS 或网络失败" ;;
+  esac
+}
+
+diagnostic_probe_site(){
+  local label="$1" url="$2" result code seconds
+  result="$(diagnostic_curl -L -A 'amki-vpn-diagnostic/1.0' --connect-timeout 8 --max-time 15 \
+    --silent --show-error -o /dev/null -w '%{http_code} %{time_total}' "$url" 2>/dev/null || true)"
+  read -r code seconds <<< "$result"
+  printf '  %-14s %-18s HTTP %s，%ss\n' "$label" "$(diagnostic_http_status_label "${code:-000}")" "${code:-000}" "${seconds:-n/a}"
+}
+
+diagnostic_unlock(){
+  hr
+  echo "AI、社交和流媒体基础可达性检测："
+  echo "  说明：HTTP 可达不等于账号登录、地区内容或订阅权益一定解锁；最终以客户端实际访问为准。"
+  echo "  [AI]"
+  diagnostic_probe_site "ChatGPT" "https://chatgpt.com/"
+  diagnostic_probe_site "OpenAI API" "https://api.openai.com/v1/models"
+  diagnostic_probe_site "Claude" "https://claude.ai/"
+  diagnostic_probe_site "Gemini" "https://gemini.google.com/"
+  echo "  [社交]"
+  diagnostic_probe_site "X" "https://x.com/"
+  diagnostic_probe_site "Instagram" "https://www.instagram.com/"
+  diagnostic_probe_site "Facebook" "https://www.facebook.com/"
+  diagnostic_probe_site "Telegram" "https://telegram.org/"
+  echo "  [视频/媒体]（默认不走 SOCKS5 域名规则）"
+  diagnostic_probe_site "YouTube" "https://www.youtube.com/"
+  diagnostic_probe_site "Netflix" "https://www.netflix.com/title/80057281"
+  diagnostic_probe_site "Disney+" "https://www.disneyplus.com/"
+  diagnostic_probe_site "TikTok" "https://www.tiktok.com/"
+  diagnostic_probe_site "Bilibili" "https://www.bilibili.com/"
+}
+
+diagnostic_netquality(){
+  local answer tmp
+  echo "NetQuality 官方脚本可以检测国内三网回程、三网测速和国际互连。"
+  echo "它是外部 AGPL 项目，不会写入 amki-vpn 配置；运行时会额外产生网络流量。"
+  read -rp "输入 RUN 才下载并运行官方脚本（其他输入返回）: " answer || return 0
+  [[ "$answer" == "RUN" ]] || { info "已取消 NetQuality"; return 0; }
+  tmp="$(mktemp)"
+  if diagnostic_curl -fsSL --connect-timeout 10 --max-time 90 "$DIAG_NETQUALITY_URL" -o "$tmp"; then
+    info "开始执行 NetQuality：仅 IPv4 + 三网回程模式"
+    bash "$tmp" -4 -R || warn "NetQuality 执行失败，请稍后重试或查看官方项目"
+  else
+    warn "无法下载 NetQuality：${DIAG_NETQUALITY_URL}"
+  fi
+  rm -f "$tmp"
+}
+
+diagnostic_all(){
+  diagnostic_system_report
+  diagnostic_service_report
+  diagnostic_speed
+  diagnostic_route
+  diagnostic_unlock
+}
+
+manage_diagnostic_menu(){
+  local answer
+  ensure_diagnostic_prereqs || return 0
+  while :; do
+    clear >/dev/null 2>&1 || true
+    hr
+    echo -e "${C_BLUE}${C_BOLD}VPS 体检 / 线路检测${C_RESET}"
+    echo -e "${C_DIM}检测默认只读；测速会消耗少量流量，NetQuality 需要单独确认。${C_RESET}"
+    hr
+    echo "  1) 系统、出口、DNS、BBR 和服务状态"
+    echo "  2) 轻量 HTTP 下载/上传测速"
+    echo "  3) VPS 出站路由与丢包（mtr/traceroute）"
+    echo "  4) AI、社交、视频基础可达性/解锁参考"
+    echo "  5) 国内三网回程 + 国内测速（官方 NetQuality）"
+    echo "  6) 执行完整轻量体检（1-4）"
+    echo "  0) 返回主菜单"
+    hr
+    read -rp "选择: " answer || return 0
+    case "${answer:-}" in
+      1) diagnostic_system_report; read -rp "回车返回..." _ || true ;;
+      2) diagnostic_speed; read -rp "回车返回..." _ || true ;;
+      3) diagnostic_route; read -rp "回车返回..." _ || true ;;
+      4) diagnostic_unlock; read -rp "回车返回..." _ || true ;;
+      5) diagnostic_netquality; read -rp "回车返回..." _ || true ;;
+      6) diagnostic_all; read -rp "回车返回..." _ || true ;;
+      0|"") return 0 ;;
+    esac
+  done
+}
+
 # ===== 显示状态与 banner =====
 sb_service_state(){
   systemctl is-active --quiet "${SYSTEMD_SERVICE:-sing-box.service}" && echo -e "${C_GREEN}运行中${C_RESET}" || echo -e "${C_RED}未运行/未安装${C_RESET}"
@@ -1442,6 +1697,7 @@ banner(){
   echo -e "  ${C_GREEN}8)${C_RESET} 配置/管理 VPN Gate 落地"
   echo -e "  ${C_RED}9)${C_RESET} 卸载"
   echo -e "  ${C_RED}10)${C_RESET} 退出"
+  echo -e "  ${C_GREEN}11)${C_RESET} VPS 体检/测速/回程/解锁"
   echo -e "  ${C_DIM}0)${C_RESET} 退出（兼容键）"
   hr
 }
@@ -2277,6 +2533,7 @@ menu(){
     8) if ensure_installed_or_hint; then manage_vpngate_menu; fi; menu ;;
     9) uninstall_all ;; # 直接退出
     10|0) exit 0 ;;
+    11) manage_diagnostic_menu; menu ;;
     *) menu ;;
   esac
 }
