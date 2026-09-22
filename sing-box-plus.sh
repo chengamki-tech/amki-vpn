@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #  Sing-Box-Plus 原生管理脚本（18 节点：直连 9 + WARP 9）
-#  Version: v4.1.4
+#  Version: v4.1.5
 #  Project: native deployment for mainland-China network conditions
 # ============================================================
 
@@ -324,7 +324,7 @@ VPNGATE_SCORE=${VPNGATE_SCORE:-}
 
 # 常量
 SCRIPT_NAME="amki-vpn"
-SCRIPT_VERSION="v4.1.4"
+SCRIPT_VERSION="v4.1.5"
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
 REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
 GRPC_SERVICE=${GRPC_SERVICE:-grpc}
@@ -345,6 +345,16 @@ ok(){ info "$@"; }
 warn(){ echo -e "[${C_YELLOW}警告${C_RESET}] $*"; }
 die(){  echo -e "[${C_RED}错误${C_RESET}] $*" >&2; exit 1; }
 err(){  echo -e "[${C_RED}错误${C_RESET}] $*" >&2; return 1; }
+
+install_amkivpn_command(){
+  [[ "$EUID" -eq 0 ]] || return 0
+  local script_path="${BASH_SOURCE[0]:-}"
+  [[ -f "$script_path" ]] || return 0
+  script_path="$(readlink -f "$script_path" 2>/dev/null || true)"
+  [[ -n "$script_path" && -f "$script_path" ]] || return 0
+  ln -sfn "$script_path" /usr/local/bin/amkivpn
+  chmod 0755 "$script_path" /usr/local/bin/amkivpn 2>/dev/null || true
+}
 
 # --- 架构映射：uname -m -> 发行资产名 ---
 arch_map() {
@@ -2082,5 +2092,6 @@ menu(){
 
 # ===== 入口 =====
 if [[ "${BASH_SOURCE[0]:-}" == "$0" ]]; then
+  install_amkivpn_command || true
   menu
 fi
