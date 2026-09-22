@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #  Sing-Box-Plus 原生管理脚本（18 节点：直连 9 + WARP 9）
-#  Version: v4.1.2
+#  Version: v4.1.3
 #  Project: native deployment for mainland-China network conditions
 # ============================================================
 
@@ -293,6 +293,18 @@ LANDING_PASSWORD=${LANDING_PASSWORD:-}
 LANDING_SCOPE=${LANDING_SCOPE:-direct}
 LANDING_DOMAIN_FILE=${LANDING_DOMAIN_FILE:-$SB_DIR/landing-domains.txt}
 LANDING_DOMAINS=()
+# Video and high-bandwidth services stay on the normal VPS/WARP route.
+LANDING_EXCLUDED_DOMAINS=(
+  youtube.com ytimg.com googlevideo.com
+  tiktok.com tiktokcdn.com
+  twitch.tv ttvnw.net
+  netflix.com nflxvideo.net nflximg.net
+  disneyplus.com disney-plus.net
+  hulu.com primevideo.com amazonvideo.com
+  vimeo.com dailymotion.com
+  bilibili.com bilivideo.com youku.com iqiyi.com v.qq.com
+  spotify.com soundcloud.com
+)
 SOCKS5_LAST_ERROR=""
 
 # VPN Gate / OpenVPN 落地
@@ -311,7 +323,7 @@ VPNGATE_SCORE=${VPNGATE_SCORE:-}
 
 # 常量
 SCRIPT_NAME="amki-vpn"
-SCRIPT_VERSION="v4.1.2"
+SCRIPT_VERSION="v4.1.3"
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
 REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
 GRPC_SERVICE=${GRPC_SERVICE:-grpc}
@@ -575,6 +587,14 @@ validate_landing_domain(){
   done
 }
 
+is_landing_excluded_domain(){
+  local domain="$1" blocked
+  for blocked in "${LANDING_EXCLUDED_DOMAINS[@]}"; do
+    [[ "$domain" == "$blocked" || "$domain" == *."$blocked" ]] && return 0
+  done
+  return 1
+}
+
 load_landing_domains(){
   LANDING_DOMAINS=()
   [[ -f "$LANDING_DOMAIN_FILE" ]] || return 0
@@ -583,6 +603,7 @@ load_landing_domains(){
     raw="${raw%%#*}"
     domain="$(normalize_landing_domain "$raw")"
     validate_landing_domain "$domain" || continue
+    is_landing_excluded_domain "$domain" && continue
     LANDING_DOMAINS+=("$domain")
   done < "$LANDING_DOMAIN_FILE"
   if ((${#LANDING_DOMAINS[@]} > 1)); then
@@ -592,10 +613,12 @@ load_landing_domains(){
 
 save_landing_domains(){
   mkdir -p "$(dirname "$LANDING_DOMAIN_FILE")"
-  local tmp
+  local tmp domain
   tmp="$(mktemp "${LANDING_DOMAIN_FILE}.tmp.XXXXXX")" || return 1
   if ((${#LANDING_DOMAINS[@]} > 0)); then
-    printf '%s\n' "${LANDING_DOMAINS[@]}" | LC_ALL=C sort -u > "$tmp"
+    for domain in "${LANDING_DOMAINS[@]}"; do
+      is_landing_excluded_domain "$domain" || printf '%s\n' "$domain"
+    done | LC_ALL=C sort -u > "$tmp"
   fi
   chmod 600 "$tmp"
   mv -f "$tmp" "$LANDING_DOMAIN_FILE"
@@ -1379,20 +1402,39 @@ landing_apply(){
   return 0
 }
 
-landing_social_domain_defaults(){
+landing_ip_sensitive_domain_defaults(){
   LANDING_DOMAINS=(
     # AI services
     openai.com chatgpt.com chat.openai.com oaistatic.com oaiusercontent.com
     anthropic.com claude.ai perplexity.ai perplexity.com
     gemini.google.com generativelanguage.googleapis.com aistudio.google.com
-    copilot.microsoft.com
-    # Social and communication services
-    x.com twitter.com t.co twimg.com
-    facebook.com fbcdn.net instagram.com cdninstagram.com threads.net
-    reddit.com redditstatic.com discord.com discordapp.com discordapp.net
-    telegram.org t.me youtube.com ytimg.com googlevideo.com
-    tiktok.com tiktokcdn.com linkedin.com licdn.com
+    copilot.microsoft.com githubcopilot.com character.ai poe.com
+    midjourney.com huggingface.co deepseek.com mistral.ai groq.com
+    cohere.com together.ai openrouter.ai cursor.com windsurf.com v0.dev
+    # Social and communication accounts (media/CDN hosts are intentionally omitted)
+    x.com twitter.com t.co
+    facebook.com instagram.com threads.net
+    reddit.com discord.com discordapp.com
+    telegram.org t.me whatsapp.com signal.org line.me
+    linkedin.com bluesky.app bsky.app snapchat.com quora.com
+    # Developer, identity and account-security services
+    github.com gitlab.com bitbucket.org vercel.com netlify.com render.com
+    cloudflare.com dash.cloudflare.com digitalocean.com vultr.com
+    accounts.google.com myaccount.google.com login.live.com account.live.com
+    microsoftonline.com appleid.apple.com login.yahoo.com auth0.com okta.com
+    onelogin.com 1password.com lastpass.com proton.me protonmail.com fastmail.com
+    # Payments, banking and exchanges
+    paypal.com paypal.me stripe.com wise.com transferwise.com revolut.com
+    cash.app venmo.com squareup.com coinbase.com kraken.com binance.com
+    bybit.com okx.com robinhood.com interactivebrokers.com schwab.com
+    fidelity.com chase.com capitalone.com americanexpress.com
+    # Travel and location-sensitive services
+    uber.com airbnb.com booking.com
   )
+}
+
+landing_social_domain_defaults(){
+  landing_ip_sensitive_domain_defaults
 }
 
 show_landing_domains(){
@@ -1438,6 +1480,10 @@ parse_landing_domain_input(){
       warn "忽略无效域名：$token（仅支持 example.com 或 *.example.com）"
       continue
     fi
+    if is_landing_excluded_domain "$domain"; then
+      warn "忽略视频/大流量域名：$token（禁止走 SOCKS5）"
+      continue
+    fi
     LANDING_DOMAINS+=("$domain")
   done
   if ((${#LANDING_DOMAINS[@]} > 1)); then
@@ -1459,11 +1505,11 @@ configure_landing_domains(){
   info "当前域名会优先走 SOCKS5；未匹配域名保持原有路由：直连节点走 VPS，-warp 节点走 WARP。"
   echo "当前规则："
   show_landing_domains
-  echo "输入多个域名时用空格或逗号分隔；输入 social 使用推荐的 AI/社交媒体列表；输入 clear 清空规则。"
+  echo "输入多个域名时用空格或逗号分隔；输入 sensitive（或 social）使用 IP 敏感站点列表；输入 clear 清空规则。"
   local input
   read -rp "域名规则: " input || return 0
   case "${input,,}" in
-    social|default|recommended|推荐) landing_social_domain_defaults ;;
+    social|sensitive|ip-sensitive|default|recommended|推荐) landing_ip_sensitive_domain_defaults ;;
     clear|none|off|清空) LANDING_DOMAINS=() ;;
     *) parse_landing_domain_input "$input" ;;
   esac

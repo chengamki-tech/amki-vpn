@@ -4,7 +4,7 @@
 
 这是独立维护版本，不依赖上游仓库的运行时文件或配置。协议兼容性、防污染和连接稳定性可以优化，但任何节点都不能保证永久可用，也不承诺绕过所有网络策略或第三方识别。
 
-当前脚本版本：`v4.1.2`。
+当前脚本版本：`v4.1.3`。
 
 ## 特性
 
@@ -75,7 +75,8 @@ bash amki-vpn.sh
 
 在菜单 `7 -> 4` 配置域名规则：
 
-- 输入 `social` 使用内置的 AI、X、Facebook、Instagram、Threads、Reddit、Discord、Telegram、YouTube、TikTok、LinkedIn 等推荐列表。
+- 输入 `sensitive`（或兼容旧命令 `social`）使用内置的 IP 敏感站点列表，覆盖 AI、社交/通信、开发者账号、身份认证、支付/金融、交易所和部分位置敏感服务。
+- 视频和大流量服务不进入 SOCKS5：YouTube、TikTok、Twitch、Netflix、Disney+、Hulu、Prime Video、Vimeo、哔哩哔哩、优酷、爱奇艺、Spotify 等；手动输入这些域名也会被拒绝。
 - 也可以输入自定义域名，多个域名用空格或逗号分隔；`*.example.com` 会按后缀匹配主域名及其子域名。
 - 匹配域名优先走 SOCKS5；未匹配域名保持原有节点语义：直连 9 走 VPS，`-warp` 9 走 Cloudflare WARP。
 - VPS 的 SSH、系统服务和 OpenVPN 默认路由不被修改；域名规则只作用于经 sing-box 入站的客户端流量。
